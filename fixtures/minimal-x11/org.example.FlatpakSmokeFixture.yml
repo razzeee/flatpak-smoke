@@ -1,0 +1,17 @@
+app-id: org.example.FlatpakSmokeFixture
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: flatpak-smoke-fixture
+finish-args:
+  - --share=ipc
+  - --socket=x11
+modules:
+  - name: flatpak-smoke-fixture
+    buildsystem: simple
+    build-commands:
+      - cc fixture.c -o flatpak-smoke-fixture -lX11
+      - install -Dm755 flatpak-smoke-fixture /app/bin/flatpak-smoke-fixture
+    sources:
+      - type: file
+        path: fixture.c
