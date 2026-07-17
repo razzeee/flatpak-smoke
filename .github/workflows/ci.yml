@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-checks:
+    name: Cargo checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check build
+        run: cargo check --all-targets
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  fixture-end-to-end:
+    name: Fixture end-to-end smoke test
+    runs-on: ubuntu-latest
+    needs: cargo-checks
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+
+      - name: Add Flathub
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Build verifier container
+        run: docker build -t flatpak-smoke -f Containerfile .
+
+      - name: Build local fixture bundle
+        run: |
+          flatpak-builder --force-clean --user --install-deps-from=flathub --repo=target/fixture-repo target/fixture-build fixtures/minimal-x11/org.example.FlatpakSmokeFixture.yml
+          flatpak build-bundle target/fixture-repo target/org.example.FlatpakSmokeFixture.flatpak org.example.FlatpakSmokeFixture
+
+      - name: Verify local fixture bundle
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            flatpak-smoke \
+            verify-bundle target/org.example.FlatpakSmokeFixture.flatpak \
+            --output target/fixture-smoke-output \
+            --force \
+            --allow-network-remotes \
+            --overall-timeout 5m
+
+      - name: Assert smoke artifacts exist
+        run: |
+          set -eu
+          for output in target/fixture-smoke-output; do
+            test -s "$output/result.json"
+            test -d "$output/logs"
+            test -s "$output/logs/runner.log"
+            test -d "$output/screenshots"
+            test -s "$output/screenshots/000-window-visible.png"
+            python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "passed", result; assert result["screenshots"], result' "$output/result.json"
+          done
+
+      - name: Upload smoke outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-outputs
+          if-no-files-found: error
+          path: |
+            target/fixture-smoke-output/result.json
+            target/fixture-smoke-output/logs/**
+            target/fixture-smoke-output/screenshots/**
+
+  flathub-end-to-end:
+    name: Flathub end-to-end smoke tests
+    runs-on: ubuntu-latest
+    needs: cargo-checks
+    timeout-minutes: 60
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak
+
+      - name: Add Flathub
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Build verifier container
+        run: docker build -t flatpak-smoke -f Containerfile .
+
+      - name: Bundle Flathub apps for verification
+        run: |
+          flatpak install --user --noninteractive flathub org.gnome.Calculator org.gnome.Fractal
+          flatpak build-bundle "$HOME/.local/share/flatpak/repo" target/org.gnome.Calculator.flatpak org.gnome.Calculator stable
+          flatpak build-bundle "$HOME/.local/share/flatpak/repo" target/org.gnome.Fractal.flatpak org.gnome.Fractal stable
+
+      - name: Verify Flathub app bundle
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            flatpak-smoke \
+            verify-bundle target/org.gnome.Calculator.flatpak \
+            --output target/calculator-smoke-output \
+            --force \
+            --allow-network-remotes \
+            --overall-timeout 5m
+
+      - name: Verify Flathub app button clicks
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            flatpak-smoke \
+            verify-bundle target/org.gnome.Fractal.flatpak \
+            --output target/fractal-smoke-output \
+            --force \
+            --allow-network-remotes \
+            --overall-timeout 5m \
+            --screenshot-after-click "Log In" \
+            --screenshot-after-click "Advanced"
+
+      - name: Assert Flathub smoke artifacts exist
+        run: |
+          set -eu
+          for output in target/calculator-smoke-output target/fractal-smoke-output; do
+            test -s "$output/result.json"
+            test -d "$output/logs"
+            test -s "$output/logs/runner.log"
+            test -d "$output/screenshots"
+            test -s "$output/screenshots/000-window-visible.png"
+            python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "passed", result; assert result["screenshots"], result' "$output/result.json"
+          done
+          test -s target/fractal-smoke-output/screenshots/001-after-click-log-in.png
+          test -s target/fractal-smoke-output/screenshots/002-after-click-advanced.png
+
+      - name: Upload Flathub smoke outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flathub-smoke-test-outputs
+          if-no-files-found: error
+          path: |
+            target/calculator-smoke-output/result.json
+            target/calculator-smoke-output/logs/**
+            target/calculator-smoke-output/screenshots/**
+            target/fractal-smoke-output/result.json
+            target/fractal-smoke-output/logs/**
+            target/fractal-smoke-output/screenshots/**
