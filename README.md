@@ -16,6 +16,8 @@ flatpak-smoke doctor
 
 The output directory contains `result.json`, `screenshots/`, and `logs/`. Existing verifier artifacts cause the command to fail unless `--force` is provided.
 
+To capture additional interaction screenshots, pass `--screenshot-after-click <BUTTON_LABEL>` one or more times. The verifier locates the matching button in the latest screenshot, clicks the button center, and captures another screenshot such as `001-after-click-preferences.png`.
+
 Timeouts default to `--display-timeout 10s`, `--window-timeout 30s`, `--screenshot-timeout 10s`, and `--overall-timeout 60s`.
 
 ## Runtime Tools
@@ -31,7 +33,7 @@ The current backend uses an isolated D-Bus session plus an Xvfb display. The sup
 - `xdg-desktop-portal`
 - `xdg-desktop-portal-gtk`
 - `xdotool`
-- ImageMagick `import`
+- ImageMagick `import` and `convert`
 
 The Secret portal also requires the GNOME Keyring portal descriptor at `/usr/share/xdg-desktop-portal/portals/gnome-keyring.portal`.
 

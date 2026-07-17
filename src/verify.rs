@@ -76,6 +76,9 @@ where
     F: FnOnce(&ArtifactInstaller<'_>) -> Result<String, (Option<String>, InstallError)>,
 {
     validate_screenshot_name(&common.screenshot_name)?;
+    for text in &common.screenshots_after_click {
+        validate_click_text(text)?;
+    }
     let started = Instant::now();
     let layout = OutputLayout::prepare(&common.output, common.force)?;
 
@@ -151,7 +154,11 @@ where
         common.screenshot_timeout,
         overall_deadline,
     );
-    let session_result = session.launch_wait_and_capture(&app_ref, &common.screenshot_name);
+    let session_result = session.launch_wait_and_capture(
+        &app_ref,
+        &common.screenshot_name,
+        &common.screenshots_after_click,
+    );
 
     match session_result {
         Ok(success) => {
@@ -163,7 +170,7 @@ where
                     launch_to_window: Some(success.launch_to_window_ms),
                     total: started.elapsed().as_millis(),
                 },
-                vec![success.screenshot_path],
+                success.screenshot_paths,
             );
             layout.write_result(&result)?;
             Ok(())
@@ -278,6 +285,13 @@ fn validate_screenshot_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_click_text(text: &str) -> anyhow::Result<()> {
+    if text.trim().is_empty() {
+        bail!("--screenshot-after-click cannot be empty");
+    }
+    Ok(())
+}
+
 fn validate_app_ref(app_ref: &str) -> anyhow::Result<()> {
     if app_ref.trim().is_empty() {
         bail!("app ref cannot be empty");
@@ -298,6 +312,13 @@ mod tests {
         assert!(validate_screenshot_name("window.jpg").is_err());
         assert!(validate_screenshot_name("-window.png").is_err());
         assert!(validate_screenshot_name("window.png").is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_click_text() {
+        assert!(validate_click_text("").is_err());
+        assert!(validate_click_text("   ").is_err());
+        assert!(validate_click_text("Preferences").is_ok());
     }
 
     #[test]
