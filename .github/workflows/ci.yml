@@ -64,7 +64,7 @@ jobs:
 
       - name: Build local fixture bundle
         run: |
-          flatpak-builder --force-clean --user --install-deps-from=flathub --repo=target/fixture-repo target/fixture-build fixtures/minimal-x11/org.example.FlatpakSmokeFixture.yml
+          flatpak-builder --force-clean --user --install-deps-from=flathub --repo=target/fixture-repo target/fixture-build fixtures/minimal-wayland/org.example.FlatpakSmokeFixture.yml
           flatpak build-bundle target/fixture-repo target/org.example.FlatpakSmokeFixture.flatpak org.example.FlatpakSmokeFixture
 
       - name: Verify local fixture bundle
@@ -143,7 +143,7 @@ jobs:
             --allow-network-remotes \
             --overall-timeout 5m
 
-      - name: Verify Flathub app button clicks
+      - name: Verify Flathub Wayland app bundle
         run: |
           docker run --rm --privileged \
             -v "$PWD:/workspace" \
@@ -153,9 +153,7 @@ jobs:
             --output target/fractal-smoke-output \
             --force \
             --allow-network-remotes \
-            --overall-timeout 5m \
-            --screenshot-after-click "Log In" \
-            --screenshot-after-click "Advanced"
+            --overall-timeout 5m
 
       - name: Assert Flathub smoke artifacts exist
         run: |
@@ -168,8 +166,6 @@ jobs:
             test -s "$output/screenshots/000-window-visible.png"
             python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "passed", result; assert result["screenshots"], result' "$output/result.json"
           done
-          test -s target/fractal-smoke-output/screenshots/001-after-click-log-in.png
-          test -s target/fractal-smoke-output/screenshots/002-after-click-advanced.png
 
       - name: Upload Flathub smoke outputs
         if: always()

@@ -1,16 +1,15 @@
 app-id: org.example.FlatpakSmokeFixture
-runtime: org.freedesktop.Platform
-runtime-version: '25.08'
-sdk: org.freedesktop.Sdk
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
 command: flatpak-smoke-fixture
 finish-args:
-  - --share=ipc
-  - --socket=x11
+  - --socket=wayland
 modules:
   - name: flatpak-smoke-fixture
     buildsystem: simple
     build-commands:
-      - cc fixture.c -o flatpak-smoke-fixture -lX11
+      - cc fixture.c -o flatpak-smoke-fixture $(pkg-config --cflags --libs gtk4)
       - install -Dm755 flatpak-smoke-fixture /app/bin/flatpak-smoke-fixture
     sources:
       - type: file

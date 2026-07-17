@@ -76,9 +76,6 @@ where
     F: FnOnce(&ArtifactInstaller<'_>) -> Result<String, (Option<String>, InstallError)>,
 {
     validate_screenshot_name(&common.screenshot_name)?;
-    for text in &common.screenshots_after_click {
-        validate_click_text(text)?;
-    }
     let started = Instant::now();
     let layout = OutputLayout::prepare(&common.output, common.force)?;
 
@@ -154,11 +151,7 @@ where
         common.screenshot_timeout,
         overall_deadline,
     );
-    let session_result = session.launch_wait_and_capture(
-        &app_ref,
-        &common.screenshot_name,
-        &common.screenshots_after_click,
-    );
+    let session_result = session.launch_wait_and_capture(&app_ref, &common.screenshot_name);
 
     match session_result {
         Ok(success) => {
@@ -205,6 +198,7 @@ fn isolated_flatpak_env(workspace: &Path) -> anyhow::Result<Vec<(OsString, OsStr
     }
     fs::set_permissions(workspace.join("runtime"), fs::Permissions::from_mode(0o700))
         .context("setting XDG_RUNTIME_DIR permissions")?;
+    write_weston_config(workspace)?;
     write_portal_config(workspace)?;
 
     Ok(vec![
@@ -229,6 +223,15 @@ fn isolated_flatpak_env(workspace: &Path) -> anyhow::Result<Vec<(OsString, OsStr
             workspace.join("runtime").into_os_string(),
         ),
     ])
+}
+
+fn write_weston_config(workspace: &Path) -> anyhow::Result<()> {
+    fs::write(
+        workspace.join("config/weston.ini"),
+        "[core]\nidle-time=0\nrenderer=pixman\n\n[shell]\nlocking=false\npanel-position=none\nbackground-color=0xff202020\n",
+    )
+    .context("writing weston config")?;
+    Ok(())
 }
 
 fn write_portal_config(workspace: &Path) -> anyhow::Result<()> {
@@ -285,13 +288,6 @@ fn validate_screenshot_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_click_text(text: &str) -> anyhow::Result<()> {
-    if text.trim().is_empty() {
-        bail!("--screenshot-after-click cannot be empty");
-    }
-    Ok(())
-}
-
 fn validate_app_ref(app_ref: &str) -> anyhow::Result<()> {
     if app_ref.trim().is_empty() {
         bail!("app ref cannot be empty");
@@ -312,13 +308,6 @@ mod tests {
         assert!(validate_screenshot_name("window.jpg").is_err());
         assert!(validate_screenshot_name("-window.png").is_err());
         assert!(validate_screenshot_name("window.png").is_ok());
-    }
-
-    #[test]
-    fn rejects_empty_click_text() {
-        assert!(validate_click_text("").is_err());
-        assert!(validate_click_text("   ").is_err());
-        assert!(validate_click_text("Preferences").is_ok());
     }
 
     #[test]
@@ -354,6 +343,7 @@ mod tests {
                 .join("config/xdg-desktop-portal/portals.conf")
                 .is_file()
         );
+        assert!(temp.path().join("config/weston.ini").is_file());
         assert_eq!(
             temp.path()
                 .join("runtime")

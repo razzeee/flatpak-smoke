@@ -4,7 +4,7 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -13,12 +13,10 @@ RUN apt-get update \
     flatpak \
     gnome-keyring \
     imagemagick \
-    openbox \
     tesseract-ocr \
+    weston \
     xdg-desktop-portal \
     xdg-desktop-portal-gtk \
-    xdotool \
-    xvfb \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/flatpak-smoke /usr/local/bin/flatpak-smoke
 ENTRYPOINT ["flatpak-smoke"]

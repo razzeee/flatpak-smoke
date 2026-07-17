@@ -2,7 +2,7 @@
 
 Headless smoke testing for Flatpak application builds.
 
-`flatpak-smoke` installs a Flatpak artifact into an isolated temporary user installation, starts it inside an Xvfb desktop session, waits for a visible window, captures screenshots, OCR-checks for common fatal error screens, and writes a CI-friendly `result.json`.
+`flatpak-smoke` installs a Flatpak artifact into an isolated temporary user installation, starts it inside a headless Weston Wayland session, waits for the app to draw a visible frame, captures screenshots, OCR-checks for common fatal error screens, and writes a CI-friendly `result.json`.
 
 It is intended for build pipelines that need a fast answer to: "does this freshly built Flatpak install and show a real application window?"
 
@@ -73,9 +73,9 @@ For each verification run, `flatpak-smoke`:
 3. Creates an isolated temporary Flatpak/XDG user environment.
 4. Writes an `xdg-desktop-portal` config that prefers the GTK portal backend and GNOME Keyring for the Secret portal.
 5. Installs the bundle or repo ref.
-6. Starts an Xvfb display and Openbox window manager.
+6. Starts a headless Weston Wayland compositor.
 7. Launches the app through `dbus-run-session` and `flatpak run`.
-8. Waits for a visible window.
+8. Waits for a visible Wayland frame by comparing compositor screenshots before and after launch.
 9. Captures screenshots and OCR-checks them for fatal error markers.
 10. Writes `result.json`.
 
@@ -86,41 +86,18 @@ A run fails when any of these happen:
 - Required tools are missing.
 - The artifact path or app ref is invalid.
 - The app cannot be installed.
-- The headless display or window manager cannot start.
-- The app exits before a visible window appears.
-- No visible window appears before `--window-timeout`.
-- The visible window title is exactly `Error`.
+- The headless Wayland compositor cannot start.
+- The app exits before a visible Wayland frame appears.
+- No visible Wayland frame appears before `--window-timeout`.
 - Screenshot OCR finds fatal markers such as `secret portal error`, `unexpected error`, `fatal error`, or `unhandled exception`.
-- A requested interaction screenshot cannot find a matching button label.
 
-## Interaction Screenshots
+## Screenshots
 
 By default, a successful run captures one screenshot:
 
 ```text
 screenshots/000-window-visible.png
 ```
-
-To click buttons and capture additional screenshots, pass `--screenshot-after-click <BUTTON_LABEL>`. The flag can be repeated.
-
-```sh
-cargo run -- verify-bundle ./build/org.example.App.flatpak \
-  --output ./flatpak-smoke-output \
-  --screenshot-after-click "Log In" \
-  --screenshot-after-click "Advanced"
-```
-
-This produces screenshot paths like:
-
-```text
-screenshots/000-window-visible.png
-screenshots/001-after-click-log-in.png
-screenshots/002-after-click-advanced.png
-```
-
-Button clicks are label-specific. `flatpak-smoke` will not click arbitrary OCR text or fall back to a random visible button when the requested label is absent.
-
-Interaction screenshots require ImageMagick `convert` in addition to the normal screenshot toolchain.
 
 ## Output Directory
 
@@ -134,11 +111,12 @@ flatpak-smoke-output/
   logs/
     app.stderr.log
     app.stdout.log
-    openbox.stderr.log
-    openbox.stdout.log
     runner.log
-    xvfb.stderr.log
-    xvfb.stdout.log
+    wayland-baseline.png
+    wayland-readiness.png
+    wayland-window-detection.png
+    weston.stderr.log
+    weston.stdout.log
 ```
 
 `result.json` is stable and intended for CI parsing.
@@ -172,8 +150,8 @@ Default timeouts:
 
 | Option | Default | Meaning |
 | --- | ---: | --- |
-| `--display-timeout` | `10s` | Time allowed for Xvfb to become usable. |
-| `--window-timeout` | `30s` | Time allowed for the app to show a visible window. |
+| `--display-timeout` | `10s` | Time allowed for Weston to become usable. |
+| `--window-timeout` | `30s` | Time allowed for the app to draw a visible Wayland frame. |
 | `--screenshot-timeout` | `10s` | Time allowed for each screenshot capture. |
 | `--overall-timeout` | `60s` | Total run budget. |
 
@@ -193,18 +171,13 @@ Normal verification requires:
 - `flatpak`
 - `dbus-run-session`
 - `gnome-keyring-daemon`
-- `Xvfb`
-- `openbox`
+- `weston`
+- `weston-screenshooter`
 - `tesseract`
 - `xdg-desktop-portal`
 - `xdg-desktop-portal-gtk`
-- `xdotool`
-- ImageMagick `import`
+- ImageMagick `compare`
 - GNOME Keyring portal descriptor at `/usr/share/xdg-desktop-portal/portals/gnome-keyring.portal`
-
-Interaction screenshots also require:
-
-- ImageMagick `convert`
 
 Check the normal toolchain with:
 
@@ -231,18 +204,6 @@ podman run --rm --privileged \
   --output ./flatpak-smoke-output
 ```
 
-With interaction screenshots:
-
-```sh
-podman run --rm --privileged \
-  -v "$PWD:/workspace:Z" \
-  -w /workspace \
-  flatpak-smoke \
-  verify-bundle ./build/org.example.App.flatpak \
-  --output ./flatpak-smoke-output \
-  --screenshot-after-click "Log In"
-```
-
 Flatpak often needs namespace support inside CI containers. `--privileged` is a known-good starting point; tighten privileges for your runner once Flatpak sandboxing and user namespaces are confirmed to work.
 
 ## Troubleshooting
@@ -254,10 +215,6 @@ Use `--force` to replace prior `result.json`, `screenshots/`, and `logs/` artifa
 ### Runtime Dependencies Are Missing
 
 Use `--allow-network-remotes` if the bundle needs runtimes or extensions that are not available in the isolated Flatpak user installation.
-
-### A Button Click Is Not Found
-
-Use the exact visible button label when passing `--screenshot-after-click`. If the app uses custom rendering or low-contrast text that OCR cannot read, inspect `screenshots/` and `logs/runner.log` to see what was detected.
 
 ### The App Needs More Time
 

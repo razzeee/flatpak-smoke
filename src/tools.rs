@@ -10,11 +10,10 @@ pub const REQUIRED_TOOLS: &[&str] = &[
     "flatpak",
     "dbus-run-session",
     "gnome-keyring-daemon",
-    "Xvfb",
-    "openbox",
+    "weston",
+    "weston-screenshooter",
     "tesseract",
-    "xdotool",
-    "import",
+    "compare",
 ];
 
 const REQUIRED_PATHS: &[RequiredPath] = &[
