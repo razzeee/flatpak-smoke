@@ -14,6 +14,7 @@ pub const REQUIRED_TOOLS: &[&str] = &[
     "weston-screenshooter",
     "tesseract",
     "compare",
+    "identify",
 ];
 
 const REQUIRED_PATHS: &[RequiredPath] = &[

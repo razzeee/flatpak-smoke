@@ -45,6 +45,7 @@ impl<'a> SessionRunner<'a> {
         &self,
         app_ref: &str,
         screenshot_name: &str,
+        screenshots_after_click: &[String],
     ) -> Result<SessionSuccess, SessionError> {
         let display = WAYLAND_DISPLAY.to_string();
         self.layout
@@ -52,7 +53,8 @@ impl<'a> SessionRunner<'a> {
             .map_err(SessionError::internal)?;
 
         let mut weston = self.start_weston(&display)?;
-        let session_result = self.run_app_session(app_ref, screenshot_name, &display);
+        let session_result =
+            self.run_app_session(app_ref, screenshot_name, screenshots_after_click, &display);
         terminate_child(&mut weston);
         session_result
     }
@@ -61,6 +63,7 @@ impl<'a> SessionRunner<'a> {
         &self,
         app_ref: &str,
         screenshot_name: &str,
+        screenshots_after_click: &[String],
         display: &str,
     ) -> Result<SessionSuccess, SessionError> {
         let launch_started = Instant::now();
@@ -94,11 +97,13 @@ impl<'a> SessionRunner<'a> {
             let screenshot_path = self.layout.screenshot_path(screenshot_name);
             let relative_screenshot_path = self.layout.relative_screenshot_path(screenshot_name);
             let mut screenshots = Vec::new();
-            screenshotter.capture(
+            self.capture_required_screenshot(
+                &screenshotter,
                 &screenshot_path,
+                relative_screenshot_path,
                 self.bounded_timeout(self.screenshot_timeout)?,
+                &mut screenshots,
             )?;
-            screenshots.push(relative_screenshot_path);
             if let Some(marker) = screenshotter
                 .detect_app_error_text(&screenshot_path)
                 .map_err(|error| error.with_screenshots(screenshots.clone()))?
@@ -106,6 +111,16 @@ impl<'a> SessionRunner<'a> {
                 return Err(SessionError::new(
                     FailureReason::AppErrorWindow,
                     format!("screenshot text matched app error marker '{marker}'"),
+                )
+                .with_screenshots(screenshots));
+            }
+
+            if let Some(click_text) = screenshots_after_click.first() {
+                return Err(SessionError::new(
+                    FailureReason::ScreenshotFailed,
+                    format!(
+                        "cannot capture screenshot after clicking '{click_text}': generic pointer click injection is not available in the Wayland-only backend"
+                    ),
                 )
                 .with_screenshots(screenshots));
             }
@@ -119,6 +134,30 @@ impl<'a> SessionRunner<'a> {
         terminate_child(&mut app);
         terminate_keyring_unlock_daemons(&self.env);
         result
+    }
+
+    fn capture_required_screenshot(
+        &self,
+        screenshotter: &Screenshotter,
+        path: &Path,
+        relative_path: String,
+        timeout: Duration,
+        screenshots: &mut Vec<String>,
+    ) -> Result<(), SessionError> {
+        screenshotter.capture(path, timeout)?;
+        screenshots.push(relative_path);
+        if screenshotter.screenshot_has_content(path)? {
+            Ok(())
+        } else {
+            Err(SessionError::new(
+                FailureReason::ScreenshotFailed,
+                format!(
+                    "screenshot '{}' contained no visible app content",
+                    path.display()
+                ),
+            )
+            .with_screenshots(screenshots.clone()))
+        }
     }
 
     fn start_weston(&self, display: &str) -> Result<Child, SessionError> {
@@ -213,9 +252,13 @@ impl<'a> SessionRunner<'a> {
             }
 
             screenshotter.capture_once(&candidate_path)?;
-            if screenshotter.screenshots_differ(baseline_path, &candidate_path)? {
+            if screenshotter.screenshots_differ(baseline_path, &candidate_path)?
+                && screenshotter.screenshot_has_content(&candidate_path)?
+            {
                 self.layout
-                    .append_runner_log("visible Wayland frame detected from screenshot delta")
+                    .append_runner_log(
+                        "visible Wayland frame detected from non-empty screenshot content",
+                    )
                     .map_err(SessionError::internal)?;
                 return Ok(());
             }
@@ -442,6 +485,46 @@ impl Screenshotter {
         }
     }
 
+    fn screenshot_has_content(&self, path: &Path) -> Result<bool, SessionError> {
+        let output = self
+            .command("identify")
+            .args(["-format", "%[fx:standard_deviation]"])
+            .arg(path)
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                parse_standard_deviation(&stdout)
+                    .map(|value| value > SCREENSHOT_CONTENT_STANDARD_DEVIATION_THRESHOLD)
+                    .ok_or_else(|| {
+                        SessionError::new(
+                            FailureReason::ScreenshotFailed,
+                            format!(
+                                "failed to parse ImageMagick standard deviation: {}",
+                                stdout.trim()
+                            ),
+                        )
+                    })
+            }
+            Ok(output) => Err(SessionError::new(
+                FailureReason::ScreenshotFailed,
+                format!(
+                    "failed to inspect screenshot with ImageMagick: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(SessionError::new(
+                FailureReason::DependencyFailed,
+                "missing required tool: identify",
+            )),
+            Err(error) => Err(SessionError::new(
+                FailureReason::ScreenshotFailed,
+                format!("failed to run ImageMagick identify: {error}"),
+            )),
+        }
+    }
+
     fn detect_app_error_text(&self, path: &Path) -> Result<Option<&'static str>, SessionError> {
         let output = self
             .command("tesseract")
@@ -518,6 +601,7 @@ fn normalized_ocr_text(text: &str) -> String {
 }
 
 const SCREENSHOT_DIFF_PIXEL_THRESHOLD: u64 = 25;
+const SCREENSHOT_CONTENT_STANDARD_DEVIATION_THRESHOLD: f64 = 0.01;
 
 fn find_screenshot_file(dir: &Path) -> Result<PathBuf, SessionError> {
     let mut png_files = Vec::new();
@@ -560,6 +644,10 @@ fn parse_absolute_error_metric(output: &str) -> Option<u64> {
         .split_whitespace()
         .find_map(|part| part.parse::<f64>().ok())
         .map(|value| value.round() as u64)
+}
+
+fn parse_standard_deviation(output: &str) -> Option<f64> {
+    output.trim().parse().ok()
 }
 
 const APP_ERROR_TEXT_MARKERS: &[&str] = &[
@@ -689,6 +777,13 @@ mod tests {
         assert_eq!(parse_absolute_error_metric("0"), Some(0));
         assert_eq!(parse_absolute_error_metric("120 (0.002)"), Some(120));
         assert_eq!(parse_absolute_error_metric("not a metric"), None);
+    }
+
+    #[test]
+    fn parses_normalized_screenshot_standard_deviation() {
+        assert_eq!(parse_standard_deviation("0"), Some(0.0));
+        assert_eq!(parse_standard_deviation("0.278258"), Some(0.278258));
+        assert_eq!(parse_standard_deviation("not a metric"), None);
     }
 
     #[test]

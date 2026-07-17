@@ -99,6 +99,10 @@ By default, a successful run captures one screenshot:
 screenshots/000-window-visible.png
 ```
 
+Every requested screenshot must contain visible app content. A run fails if a screenshot file is captured but only contains a solid compositor background.
+
+Interaction screenshots can be requested with `--screenshot-after-click <BUTTON_LABEL>`. The Wayland-only backend does not currently have a generic pointer injection mechanism, so requested interaction screenshots fail explicitly instead of passing with missing artifacts.
+
 ## Output Directory
 
 Each run writes:
@@ -176,7 +180,7 @@ Normal verification requires:
 - `tesseract`
 - `xdg-desktop-portal`
 - `xdg-desktop-portal-gtk`
-- ImageMagick `compare`
+- ImageMagick `compare` and `identify`
 - GNOME Keyring portal descriptor at `/usr/share/xdg-desktop-portal/portals/gnome-keyring.portal`
 
 Check the normal toolchain with:

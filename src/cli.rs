@@ -65,6 +65,10 @@ pub struct VerifyCommonArgs {
 
     #[arg(long, default_value = "000-window-visible.png")]
     pub screenshot_name: String,
+
+    /// Button label to click after the first screenshot, then capture another screenshot.
+    #[arg(long = "screenshot-after-click")]
+    pub screenshots_after_click: Vec<String>,
 }
 
 pub fn parse_duration(input: &str) -> Result<Duration, String> {
@@ -139,6 +143,31 @@ mod tests {
                 assert_eq!(args.common.output, PathBuf::from("out"));
                 assert!(args.common.force);
                 assert_eq!(args.common.window_timeout, Duration::from_secs(5));
+            }
+            _ => panic!("expected verify-bundle"),
+        }
+    }
+
+    #[test]
+    fn parses_repeated_screenshot_after_click_options() {
+        let cli = Cli::parse_from([
+            "flatpak-smoke",
+            "verify-bundle",
+            "app.flatpak",
+            "--output",
+            "out",
+            "--screenshot-after-click",
+            "Log In",
+            "--screenshot-after-click",
+            "Advanced",
+        ]);
+
+        match cli.command {
+            Commands::VerifyBundle(args) => {
+                assert_eq!(
+                    args.common.screenshots_after_click,
+                    vec!["Log In".to_string(), "Advanced".to_string()]
+                );
             }
             _ => panic!("expected verify-bundle"),
         }
