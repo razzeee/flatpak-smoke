@@ -126,6 +126,7 @@ jobs:
 
       - name: Bundle Flathub apps for verification
         run: |
+          mkdir -p target
           flatpak install --user --noninteractive flathub org.gnome.Calculator org.gnome.Fractal
           flatpak build-bundle "$HOME/.local/share/flatpak/repo" target/org.gnome.Calculator.flatpak org.gnome.Calculator stable
           flatpak build-bundle "$HOME/.local/share/flatpak/repo" target/org.gnome.Fractal.flatpak org.gnome.Fractal stable
