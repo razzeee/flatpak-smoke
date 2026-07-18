@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsString,
     fs,
     os::unix::fs::PermissionsExt,
@@ -15,7 +16,7 @@ use crate::{
     installer::{ArtifactInstaller, InstallError},
     output::OutputLayout,
     result::{Artifact, FailureReason, RunResult, Timings},
-    session::SessionRunner,
+    session::{SessionRunner, click_screenshot_name},
     tools,
 };
 
@@ -79,6 +80,7 @@ where
     for text in &common.screenshots_after_click {
         validate_click_text(text)?;
     }
+    validate_screenshot_artifact_names(&common.screenshot_name, &common.screenshots_after_click)?;
     let started = Instant::now();
     let layout = OutputLayout::prepare(&common.output, common.force)?;
 
@@ -302,6 +304,22 @@ fn validate_click_text(text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_screenshot_artifact_names(
+    screenshot_name: &str,
+    screenshots_after_click: &[String],
+) -> anyhow::Result<()> {
+    let mut names = HashSet::from([screenshot_name.to_string()]);
+    for (index, text) in screenshots_after_click.iter().enumerate() {
+        let name = click_screenshot_name(index + 1, text);
+        if !names.insert(name.clone()) {
+            bail!(
+                "screenshot artifact name '{name}' would be written more than once; choose a different --screenshot-name or --screenshot-after-click label"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_app_ref(app_ref: &str) -> anyhow::Result<()> {
     if app_ref.trim().is_empty() {
         bail!("app ref cannot be empty");
@@ -329,6 +347,14 @@ mod tests {
         assert!(validate_click_text("").is_err());
         assert!(validate_click_text("   ").is_err());
         assert!(validate_click_text("Preferences").is_ok());
+    }
+
+    #[test]
+    fn rejects_screenshot_name_that_collides_with_generated_click_name() {
+        let clicks = vec!["Log In".to_string()];
+
+        assert!(validate_screenshot_artifact_names("001-after-click-log-in.png", &clicks).is_err());
+        assert!(validate_screenshot_artifact_names("000-window-visible.png", &clicks).is_ok());
     }
 
     #[test]

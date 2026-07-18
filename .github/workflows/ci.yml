@@ -77,6 +77,7 @@ jobs:
             --output target/fixture-smoke-output \
             --force \
             --allow-network-remotes \
+            --screenshot-after-click "Click Me" \
             --overall-timeout 5m
 
       - name: Assert smoke artifacts exist
@@ -88,8 +89,10 @@ jobs:
             test -s "$output/logs/runner.log"
             test -d "$output/screenshots"
             test -s "$output/screenshots/000-window-visible.png"
+            test -s "$output/screenshots/001-after-click-click-me.png"
             python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "passed", result; assert result["screenshots"], result' "$output/result.json"
           done
+          python3 -c 'import json; result = json.load(open("target/fixture-smoke-output/result.json")); assert "screenshots/001-after-click-click-me.png" in result["screenshots"], result'
 
       - name: Upload smoke outputs
         if: always()
@@ -153,6 +156,7 @@ jobs:
             --output target/fractal-smoke-output \
             --force \
             --allow-network-remotes \
+            --screenshot-after-click "Log In" \
             --overall-timeout 5m
 
       - name: Assert Flathub smoke artifacts exist
@@ -166,6 +170,8 @@ jobs:
             test -s "$output/screenshots/000-window-visible.png"
             python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "passed", result; assert result["screenshots"], result' "$output/result.json"
           done
+          test -s target/fractal-smoke-output/screenshots/001-after-click-log-in.png
+          python3 -c 'import json; result = json.load(open("target/fractal-smoke-output/result.json")); assert len(result["screenshots"]) >= 2, result; assert "screenshots/001-after-click-log-in.png" in result["screenshots"], result'
 
       - name: Upload Flathub smoke outputs
         if: always()

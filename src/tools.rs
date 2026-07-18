@@ -11,9 +11,9 @@ pub const REQUIRED_TOOLS: &[&str] = &[
     "dbus-run-session",
     "gnome-keyring-daemon",
     "weston",
-    "weston-screenshooter",
     "tesseract",
     "compare",
+    "convert",
     "identify",
 ];
 
@@ -27,6 +27,7 @@ const REQUIRED_PATHS: &[RequiredPath] = &[
         "gnome-keyring Secret portal backend",
         "/usr/share/xdg-desktop-portal/portals/gnome-keyring.portal",
     ),
+    RequiredPath::file("Weston VNC PAM service", "/etc/pam.d/weston-remote-access"),
 ];
 
 pub fn doctor() -> anyhow::Result<()> {

@@ -17,6 +17,7 @@ RUN apt-get update \
     weston \
     xdg-desktop-portal \
     xdg-desktop-portal-gtk \
+  && printf 'auth required pam_permit.so\naccount required pam_permit.so\n' > /etc/pam.d/weston-remote-access \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/flatpak-smoke /usr/local/bin/flatpak-smoke
 ENTRYPOINT ["flatpak-smoke"]

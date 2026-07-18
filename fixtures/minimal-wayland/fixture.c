@@ -1,5 +1,12 @@
 #include <gtk/gtk.h>
 
+static void clicked(GtkButton *button, gpointer user_data) {
+    GtkLabel *label = GTK_LABEL(user_data);
+
+    gtk_label_set_text(label, "flatpak-smoke fixture clicked");
+    gtk_button_set_label(button, "Clicked");
+}
+
 static void activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
 
@@ -8,7 +15,18 @@ static void activate(GtkApplication *app, gpointer user_data) {
     gtk_window_set_default_size(GTK_WINDOW(window), 480, 260);
 
     GtkWidget *label = gtk_label_new("flatpak-smoke fixture");
-    gtk_window_set_child(GTK_WINDOW(window), label);
+    GtkWidget *button = gtk_button_new_with_label("Click Me");
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 24);
+
+    gtk_widget_add_css_class(button, "suggested-action");
+    gtk_widget_set_halign(box, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+    gtk_widget_set_size_request(button, 160, 44);
+    gtk_box_append(GTK_BOX(box), label);
+    gtk_box_append(GTK_BOX(box), button);
+    gtk_window_set_child(GTK_WINDOW(window), box);
+
+    g_signal_connect(button, "clicked", G_CALLBACK(clicked), label);
     gtk_window_present(GTK_WINDOW(window));
 }
 

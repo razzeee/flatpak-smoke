@@ -73,7 +73,7 @@ For each verification run, `flatpak-smoke`:
 3. Creates an isolated temporary Flatpak/XDG user environment.
 4. Writes an `xdg-desktop-portal` config that prefers the GTK portal backend and GNOME Keyring for the Secret portal.
 5. Installs the bundle or repo ref.
-6. Starts a headless Weston Wayland compositor.
+6. Starts a headless Weston Wayland compositor with a local VNC backend for screenshots and pointer input.
 7. Launches the app through `dbus-run-session` and `flatpak run`.
 8. Waits for a visible Wayland frame by comparing compositor screenshots before and after launch.
 9. Captures screenshots and OCR-checks them for fatal error markers.
@@ -101,7 +101,15 @@ screenshots/000-window-visible.png
 
 Every requested screenshot must contain visible app content. A run fails if a screenshot file is captured but only contains a solid compositor background.
 
-Interaction screenshots can be requested with `--screenshot-after-click <BUTTON_LABEL>`. The Wayland-only backend does not currently have a generic pointer injection mechanism, so requested interaction screenshots fail explicitly instead of passing with missing artifacts.
+Interaction screenshots can be requested with `--screenshot-after-click <BUTTON_LABEL>`. The label is located in the previous screenshot with OCR, with a matching primary-action visual fallback for small inverse button labels, clicked through the local Weston VNC backend, and captured as a required follow-up artifact:
+
+```sh
+cargo run -- verify-bundle ./build/org.example.App.flatpak \
+  --output ./flatpak-smoke-output \
+  --screenshot-after-click "Log In"
+```
+
+The first requested click writes `screenshots/001-after-click-log-in.png`; later clicks increment the prefix. A run fails if the click text cannot be found, the pointer event cannot be delivered, the follow-up screenshot is blank, or the screenshot does not visibly change before `--screenshot-timeout`.
 
 ## Output Directory
 
@@ -112,6 +120,7 @@ flatpak-smoke-output/
   result.json
   screenshots/
     000-window-visible.png
+    001-after-click-log-in.png
   logs/
     app.stderr.log
     app.stdout.log
@@ -176,12 +185,12 @@ Normal verification requires:
 - `dbus-run-session`
 - `gnome-keyring-daemon`
 - `weston`
-- `weston-screenshooter`
 - `tesseract`
 - `xdg-desktop-portal`
 - `xdg-desktop-portal-gtk`
-- ImageMagick `compare` and `identify`
+- ImageMagick `compare`, `convert`, and `identify`
 - GNOME Keyring portal descriptor at `/usr/share/xdg-desktop-portal/portals/gnome-keyring.portal`
+- Weston VNC PAM service at `/etc/pam.d/weston-remote-access`
 
 Check the normal toolchain with:
 
