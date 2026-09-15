@@ -1740,7 +1740,7 @@ fn vnc_apple_dh_response_with_secret(
 
 fn encrypt_aes128_ecb(key: &[u8], data: &mut [u8]) -> Result<(), SessionError> {
     let cipher = Aes128::new_from_slice(key).map_err(SessionError::internal)?;
-    for chunk in data.chunks_exact_mut(16) {
+    for chunk in data.as_chunks_mut::<16>().0 {
         let block = Block::<Aes128>::from_mut_slice(chunk);
         cipher.encrypt_block(block);
     }
