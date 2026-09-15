@@ -1,11 +1,11 @@
 use std::{
+    cell::Cell,
     ffi::{OsStr, OsString},
     fs::{self, File},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Stdio},
-    thread,
+    process::Stdio,
     time::{Duration, Instant},
 };
 
@@ -19,6 +19,9 @@ use num_bigint::BigUint;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
+use crate::process::{
+    BoundedCommand, DeadlineStream, ManagedChild as Child, remaining, sleep_before,
+};
 use crate::{command::ensure_file_nonempty, output::OutputLayout, result::FailureReason};
 
 pub struct SessionRunner<'a> {
@@ -90,11 +93,17 @@ impl<'a> SessionRunner<'a> {
             vnc_port,
             self.env.clone(),
             self.layout.runner_log.clone(),
+            self.overall_deadline,
         );
-        let mut session_client = VncClient::connect(vnc_port)?;
+        screenshotter.deadline.set(
+            self.overall_deadline
+                .min(Instant::now() + self.screenshot_timeout),
+        );
+        let mut session_client = VncClient::connect(vnc_port, screenshotter.deadline.get())?;
         let baseline_path = self.layout.logs_dir.join("wayland-baseline.png");
         screenshotter.capture_once_with_client(&mut session_client, &baseline_path)?;
 
+        let _keyring_cleanup = KeyringCleanup(&self.env);
         let mut app = self.spawn_app(app_ref, display)?;
         let result = (|| {
             self.wait_for_app_frame(
@@ -113,7 +122,8 @@ impl<'a> SessionRunner<'a> {
                 ));
             }
 
-            thread::sleep(Duration::from_millis(500));
+            sleep_before(Duration::from_millis(500), self.overall_deadline)
+                .map_err(SessionError::internal)?;
 
             let mut screenshot_path = self.layout.screenshot_path(screenshot_name);
             let relative_screenshot_path = self.layout.relative_screenshot_path(screenshot_name);
@@ -138,6 +148,10 @@ impl<'a> SessionRunner<'a> {
             }
 
             for (index, click_text) in screenshots_after_click.iter().enumerate() {
+                screenshotter.deadline.set(
+                    self.overall_deadline
+                        .min(Instant::now() + self.screenshot_timeout),
+                );
                 let click_target = screenshotter
                     .find_text_center(&screenshot_path, click_text)?
                     .ok_or_else(|| {
@@ -150,7 +164,8 @@ impl<'a> SessionRunner<'a> {
                 screenshotter
                     .click_with_client(&mut session_client, click_target)
                     .map_err(|error| error.with_screenshots(screenshots.clone()))?;
-                thread::sleep(Duration::from_millis(500));
+                sleep_before(Duration::from_millis(500), self.overall_deadline)
+                    .map_err(SessionError::internal)?;
 
                 let next_path = self.capture_changed_screenshot(
                     &screenshotter,
@@ -174,6 +189,9 @@ impl<'a> SessionRunner<'a> {
                 screenshot_path = next_path;
             }
 
+            remaining(self.overall_deadline).map_err(|error| {
+                SessionError::internal(error).with_screenshots(screenshots.clone())
+            })?;
             Ok(SessionSuccess {
                 screenshot_paths: screenshots,
                 launch_to_window_ms: launch_to_window,
@@ -181,7 +199,6 @@ impl<'a> SessionRunner<'a> {
         })();
 
         terminate_child(&mut app);
-        terminate_keyring_unlock_daemons(&self.env);
         result
     }
 
@@ -224,6 +241,9 @@ impl<'a> SessionRunner<'a> {
         let next_path = self.layout.screenshot_path(&next_name);
         let next_relative_path = self.layout.relative_screenshot_path(&next_name);
         let started = Instant::now();
+        screenshotter
+            .deadline
+            .set(self.overall_deadline.min(started + timeout));
         let mut last_error = None;
         while started.elapsed() < timeout {
             match screenshotter.capture_once_with_client(client, &next_path) {
@@ -240,7 +260,12 @@ impl<'a> SessionRunner<'a> {
                 Err(error) => last_error = Some(error.message),
             }
 
-            thread::sleep(Duration::from_millis(200));
+            sleep_before(Duration::from_millis(200), screenshotter.deadline.get()).map_err(
+                |error| {
+                    SessionError::new(FailureReason::ScreenshotFailed, error.to_string())
+                        .with_screenshots(screenshots.clone())
+                },
+            )?;
         }
 
         Err(SessionError::new(
@@ -259,6 +284,7 @@ impl<'a> SessionRunner<'a> {
     fn start_weston(&self, display: &str, vnc_port: u16) -> Result<Child, SessionError> {
         let mut last_error = None;
         for backend in ["vnc", "vnc-backend.so"] {
+            remaining(self.overall_deadline).map_err(SessionError::internal)?;
             let mut weston = self.spawn_weston(display, backend, vnc_port)?;
             match self.wait_for_compositor(display, vnc_port, &mut weston) {
                 Ok(()) => return Ok(weston),
@@ -298,7 +324,7 @@ impl<'a> SessionRunner<'a> {
             ])
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
-            .spawn()
+            .spawn_managed()
             .map_err(|error| {
                 SessionError::new(
                     FailureReason::DisplayStartFailed,
@@ -321,6 +347,7 @@ impl<'a> SessionRunner<'a> {
             vnc_port,
             self.env.clone(),
             self.layout.runner_log.clone(),
+            self.overall_deadline.min(started + timeout),
         );
         let readiness_path = self.layout.logs_dir.join("wayland-readiness.png");
         while started.elapsed() < timeout {
@@ -344,7 +371,12 @@ impl<'a> SessionRunner<'a> {
                 Err(error) => last_error = Some(error.message),
             }
 
-            thread::sleep(Duration::from_millis(100));
+            if let Err(error) =
+                sleep_before(Duration::from_millis(100), screenshotter.deadline.get())
+            {
+                last_error = Some(error.to_string());
+                break;
+            }
         }
 
         Err(SessionError::new(
@@ -368,6 +400,9 @@ impl<'a> SessionRunner<'a> {
         timeout: Duration,
     ) -> Result<(), SessionError> {
         let started = Instant::now();
+        screenshotter
+            .deadline
+            .set(self.overall_deadline.min(started + timeout));
         let candidate_path = self.layout.logs_dir.join("wayland-window-detection.png");
         while started.elapsed() < timeout {
             if let Some(status) = app.try_wait().map_err(SessionError::internal)? {
@@ -389,7 +424,15 @@ impl<'a> SessionRunner<'a> {
                 return Ok(());
             }
 
-            thread::sleep(Duration::from_millis(200));
+            if let Err(error) =
+                sleep_before(Duration::from_millis(200), screenshotter.deadline.get())
+            {
+                remaining(self.overall_deadline).map_err(SessionError::internal)?;
+                return Err(SessionError::new(
+                    FailureReason::WindowTimeout,
+                    error.to_string(),
+                ));
+            }
         }
 
         Err(SessionError::new(
@@ -402,6 +445,7 @@ impl<'a> SessionRunner<'a> {
     }
 
     fn bounded_timeout(&self, requested: Duration) -> Result<Duration, SessionError> {
+        remaining(self.overall_deadline).map_err(SessionError::internal)?;
         let remaining = self
             .overall_deadline
             .saturating_duration_since(Instant::now());
@@ -441,7 +485,7 @@ impl<'a> SessionRunner<'a> {
             .arg(&run_target)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
-            .spawn()
+            .spawn_managed()
             .map_err(|error| {
                 SessionError::new(
                     FailureReason::LaunchFailed,
@@ -504,6 +548,8 @@ impl SessionError {
 }
 
 struct Screenshotter {
+    deadline: Cell<Instant>,
+    overall_deadline: Instant,
     display: String,
     vnc_port: u16,
     env: Vec<(OsString, OsString)>,
@@ -516,8 +562,11 @@ impl Screenshotter {
         vnc_port: u16,
         env: Vec<(OsString, OsString)>,
         runner_log: PathBuf,
+        deadline: Instant,
     ) -> Self {
         Self {
+            deadline: Cell::new(deadline),
+            overall_deadline: deadline,
             display: display.to_string(),
             vnc_port,
             env,
@@ -532,6 +581,8 @@ impl Screenshotter {
         timeout: Duration,
     ) -> Result<(), SessionError> {
         let started = Instant::now();
+        self.deadline
+            .set(self.overall_deadline.min(started + timeout));
         let mut last_error = None;
 
         while started.elapsed() < timeout {
@@ -540,7 +591,10 @@ impl Screenshotter {
                 Err(error) => last_error = Some(error.message),
             }
 
-            thread::sleep(Duration::from_millis(200));
+            if let Err(error) = sleep_before(Duration::from_millis(200), self.deadline.get()) {
+                last_error = Some(error.to_string());
+                break;
+            }
         }
 
         Err(SessionError::new(
@@ -556,7 +610,7 @@ impl Screenshotter {
     }
 
     fn capture_once(&self, path: &Path) -> Result<(), SessionError> {
-        let mut client = VncClient::connect(self.vnc_port)?;
+        let mut client = VncClient::connect(self.vnc_port, self.deadline.get())?;
         client.capture_png(path)?;
         self.append_log(format!("screenshot captured at '{}'", path.display()))?;
         Ok(())
@@ -567,6 +621,7 @@ impl Screenshotter {
         client: &mut VncClient,
         target: (i32, i32),
     ) -> Result<(), SessionError> {
+        client.stream.deadline = self.deadline.get();
         client.click(target)?;
         self.append_log(format!(
             "clicked screenshot target at {},{}",
@@ -580,6 +635,7 @@ impl Screenshotter {
         client: &mut VncClient,
         path: &Path,
     ) -> Result<(), SessionError> {
+        client.stream.deadline = self.deadline.get();
         client.capture_png(path)?;
         self.append_log(format!("screenshot captured at '{}'", path.display()))?;
         Ok(())
@@ -613,7 +669,7 @@ impl Screenshotter {
             .arg(baseline)
             .arg(candidate)
             .arg("null:")
-            .output();
+            .output_before(self.deadline.get());
 
         match output {
             Ok(output) if output.status.success() => Ok(false),
@@ -648,7 +704,7 @@ impl Screenshotter {
             .command("identify")
             .args(["-format", "%[fx:standard_deviation]"])
             .arg(path)
-            .output();
+            .output_before(self.deadline.get());
 
         match output {
             Ok(output) if output.status.success() => {
@@ -689,7 +745,7 @@ impl Screenshotter {
             .arg(path)
             .arg("stdout")
             .args(["--psm", "6"])
-            .output();
+            .output_before(self.deadline.get());
 
         match output {
             Ok(output) if output.status.success() => {
@@ -731,7 +787,7 @@ impl Screenshotter {
             .arg(path)
             .arg("stdout")
             .args(["--psm", "6", "tsv"])
-            .output();
+            .output_before(self.deadline.get());
 
         match output {
             Ok(output) if output.status.success() => {
@@ -787,7 +843,7 @@ impl Screenshotter {
                 "8",
                 "null:",
             ])
-            .output();
+            .output_before(self.deadline.get());
 
         match output {
             Ok(output) if output.status.success() => {
@@ -842,7 +898,7 @@ impl Screenshotter {
             .args(["-crop", &crop_geometry])
             .args(["-resize", "400%", "-alpha", "off", "-colorspace", "Gray"])
             .arg(&crop_path)
-            .output();
+            .output_before(self.deadline.get());
 
         match output {
             Ok(output) if output.status.success() => {}
@@ -874,7 +930,7 @@ impl Screenshotter {
             .arg(&crop_path)
             .arg("stdout")
             .args(["--psm", "7"])
-            .output();
+            .output_before(self.deadline.get());
 
         match output {
             Ok(output) if output.status.success() => {
@@ -1216,28 +1272,28 @@ impl Drop for VncPortLease {
 }
 
 struct VncClient {
-    stream: TcpStream,
+    stream: DeadlineStream,
     width: u16,
     height: u16,
     pixel_format: VncPixelFormat,
 }
 
 impl VncClient {
-    fn connect(port: u16) -> Result<Self, SessionError> {
+    fn connect(port: u16, deadline: Instant) -> Result<Self, SessionError> {
         let address: SocketAddr = ([127, 0, 0, 1], port).into();
-        let mut stream =
-            TcpStream::connect_timeout(&address, Duration::from_secs(5)).map_err(|error| {
-                SessionError::new(
-                    FailureReason::DisplayStartFailed,
-                    format!("failed to connect to Weston VNC port {port}: {error}"),
-                )
-            })?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(SessionError::internal)?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .map_err(SessionError::internal)?;
+        let stream = TcpStream::connect_timeout(
+            &address,
+            remaining(deadline)
+                .map_err(SessionError::internal)?
+                .min(Duration::from_secs(5)),
+        )
+        .map_err(|error| {
+            SessionError::new(
+                FailureReason::DisplayStartFailed,
+                format!("failed to connect to Weston VNC port {port}: {error}"),
+            )
+        })?;
+        let mut stream = DeadlineStream::new(stream, deadline);
 
         let mut version = [0; 12];
         stream.read_exact(&mut version).map_err(vnc_read_error)?;
@@ -1273,7 +1329,11 @@ impl VncClient {
 
     fn capture_png(&mut self, path: &Path) -> Result<(), SessionError> {
         self.move_pointer(POINTER_PARK_POSITION)?;
-        thread::sleep(Duration::from_millis(POINTER_PARK_SETTLE_MS));
+        sleep_before(
+            Duration::from_millis(POINTER_PARK_SETTLE_MS),
+            self.stream.deadline,
+        )
+        .map_err(SessionError::internal)?;
 
         self.request_framebuffer_update()?;
         let rgb = self.read_framebuffer_update()?;
@@ -1284,7 +1344,7 @@ impl VncClient {
         let output = std::process::Command::new("convert")
             .arg(&ppm_path)
             .arg(path)
-            .output();
+            .output_before(self.stream.deadline);
         match output {
             Ok(output) if output.status.success() => {
                 ensure_file_nonempty(path).map_err(SessionError::internal)?;
@@ -1312,11 +1372,14 @@ impl VncClient {
         let x = target.0.clamp(0, i32::from(self.width.saturating_sub(1))) as u16;
         let y = target.1.clamp(0, i32::from(self.height.saturating_sub(1))) as u16;
         self.pointer_event(0, x, y)?;
-        thread::sleep(Duration::from_millis(150));
+        sleep_before(Duration::from_millis(150), self.stream.deadline)
+            .map_err(SessionError::internal)?;
         self.pointer_event(1, x, y)?;
-        thread::sleep(Duration::from_millis(100));
+        sleep_before(Duration::from_millis(100), self.stream.deadline)
+            .map_err(SessionError::internal)?;
         self.pointer_event(0, x, y)?;
-        thread::sleep(Duration::from_millis(500));
+        sleep_before(Duration::from_millis(500), self.stream.deadline)
+            .map_err(SessionError::internal)?;
         Ok(())
     }
 
@@ -1400,12 +1463,22 @@ impl VncClient {
         height: u16,
     ) -> Result<(), SessionError> {
         let bytes_per_pixel = usize::from(self.pixel_format.bits_per_pixel / 8);
-        let mut pixel = vec![0; bytes_per_pixel];
+        if usize::from(x) + usize::from(width) > usize::from(self.width)
+            || usize::from(y) + usize::from(height) > usize::from(self.height)
+        {
+            return Err(SessionError::new(
+                FailureReason::ScreenshotFailed,
+                "VNC rectangle exceeds framebuffer bounds",
+            ));
+        }
+        let mut pixels = vec![0; usize::from(width) * bytes_per_pixel];
         for row in 0..height {
-            for col in 0..width {
-                self.stream.read_exact(&mut pixel).map_err(vnc_read_error)?;
-                let (red, green, blue) = self.pixel_format.decode(&pixel);
-                let dst_x = usize::from(x + col);
+            self.stream
+                .read_exact(&mut pixels)
+                .map_err(vnc_read_error)?;
+            for (col, pixel) in pixels.chunks_exact(bytes_per_pixel).enumerate() {
+                let (red, green, blue) = self.pixel_format.decode(pixel);
+                let dst_x = usize::from(x) + col;
                 let dst_y = usize::from(y + row);
                 let dst = (dst_y * usize::from(self.width) + dst_x) * 3;
                 if dst + 2 < rgb.len() {
@@ -1525,7 +1598,7 @@ fn scale_color(value: u32, shift: u8, max: u16) -> u8 {
 }
 
 fn perform_vnc_security_handshake(
-    stream: &mut TcpStream,
+    stream: &mut DeadlineStream,
     version: &[u8; 12],
 ) -> Result<(), SessionError> {
     if version.starts_with(b"RFB 003.003") {
@@ -1580,7 +1653,7 @@ fn perform_vnc_security_handshake(
 const RFB_SECURITY_TYPE_NONE: u8 = 1;
 const RFB_SECURITY_TYPE_APPLE_DH: u8 = 30;
 
-fn read_vnc_security_result(stream: &mut TcpStream) -> Result<(), SessionError> {
+fn read_vnc_security_result(stream: &mut DeadlineStream) -> Result<(), SessionError> {
     let mut result = [0; 4];
     stream.read_exact(&mut result).map_err(vnc_read_error)?;
     match u32::from_be_bytes(result) {
@@ -1593,7 +1666,7 @@ fn read_vnc_security_result(stream: &mut TcpStream) -> Result<(), SessionError> 
     }
 }
 
-fn perform_vnc_apple_dh_auth(stream: &mut TcpStream) -> Result<(), SessionError> {
+fn perform_vnc_apple_dh_auth(stream: &mut DeadlineStream) -> Result<(), SessionError> {
     let mut header = [0; 4];
     stream.read_exact(&mut header).map_err(vnc_read_error)?;
     let generator = u16::from_be_bytes([header[0], header[1]]);
@@ -1667,7 +1740,7 @@ fn vnc_apple_dh_response_with_secret(
 
 fn encrypt_aes128_ecb(key: &[u8], data: &mut [u8]) -> Result<(), SessionError> {
     let cipher = Aes128::new_from_slice(key).map_err(SessionError::internal)?;
-    for chunk in data.chunks_exact_mut(16) {
+    for chunk in data.as_chunks_mut::<16>().0 {
         let block = Block::<Aes128>::from_mut_slice(chunk);
         cipher.encrypt_block(block);
     }
@@ -1718,7 +1791,7 @@ fn vnc_security_types_message(types: &[u8]) -> String {
         .join(", ")
 }
 
-fn read_vnc_failure_reason(stream: &mut TcpStream) -> SessionError {
+fn read_vnc_failure_reason(stream: &mut DeadlineStream) -> SessionError {
     let mut len = [0; 4];
     if stream.read_exact(&mut len).is_err() {
         return SessionError::new(FailureReason::DisplayStartFailed, "VNC handshake failed");
@@ -1782,10 +1855,15 @@ const APP_ERROR_TEXT_MARKERS: &[&str] = &[
 ];
 
 fn terminate_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
+    child.terminate();
+}
+
+struct KeyringCleanup<'a>(&'a [(OsString, OsString)]);
+
+impl Drop for KeyringCleanup<'_> {
+    fn drop(&mut self) {
+        terminate_keyring_unlock_daemons(self.0);
     }
-    let _ = child.wait();
 }
 
 #[cfg(unix)]
@@ -1797,6 +1875,7 @@ fn terminate_keyring_unlock_daemons(env: &[(OsString, OsString)]) {
         return;
     };
 
+    let mut daemons = Vec::new();
     for entry in entries.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<libc::pid_t>() else {
             continue;
@@ -1816,6 +1895,23 @@ fn terminate_keyring_unlock_daemons(env: &[(OsString, OsString)]) {
             // the daemon tied to this run's private runtime directory.
             unsafe {
                 libc::kill(pid, libc::SIGTERM);
+            }
+            daemons.push(pid);
+        }
+    }
+    if !daemons.is_empty() {
+        std::thread::sleep(Duration::from_millis(200));
+        for pid in daemons {
+            let proc_dir = Path::new("/proc").join(pid.to_string());
+            // Recheck ownership before escalating, since the daemon may have exited.
+            if fs::read(proc_dir.join("cmdline"))
+                .is_ok_and(|cmdline| is_keyring_unlock_cmdline(&cmdline))
+                && fs::read(proc_dir.join("environ"))
+                    .is_ok_and(|environ| environ_contains(&environ, "XDG_RUNTIME_DIR", runtime_dir))
+            {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
             }
         }
     }
@@ -1871,6 +1967,54 @@ fn flatpak_run_target(app_ref: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+
+    #[test]
+    fn stalled_vnc_handshake_obeys_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(500));
+        });
+        let started = Instant::now();
+        let error = VncClient::connect(port, started + Duration::from_millis(100))
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains("deadline elapsed"),
+            "{}",
+            error.message
+        );
+        assert!(started.elapsed() < Duration::from_millis(400));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn hung_ocr_obeys_screenshot_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let helper = temp.path().join("tesseract");
+        fs::write(&helper, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let screenshotter = Screenshotter::new(
+            "unused",
+            0,
+            vec![(OsString::from("PATH"), temp.path().as_os_str().to_owned())],
+            temp.path().join("runner.log"),
+            started + Duration::from_millis(150),
+        );
+        let error = screenshotter
+            .detect_app_error_text(&temp.path().join("frame.png"))
+            .unwrap_err();
+        assert!(
+            error.message.contains("deadline elapsed"),
+            "{}",
+            error.message
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn converts_full_app_ref_to_flatpak_run_target() {
@@ -2055,7 +2199,7 @@ Objects (id: bounding-box centroid area mean-color):
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let mut client = VncClient {
-            stream,
+            stream: DeadlineStream::new(stream, Instant::now() + Duration::from_secs(2)),
             width: 1,
             height: 1,
             pixel_format: VncPixelFormat {
@@ -2071,6 +2215,45 @@ Objects (id: bounding-box centroid area mean-color):
         };
 
         assert_eq!(client.read_framebuffer_update().unwrap(), vec![0, 0, 0]);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn reads_raw_framebuffer_rows() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // One raw 2x2 rectangle, followed by little-endian BGRX pixels.
+            stream
+                .write_all(&[
+                    0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 255, 0, 0, 255, 0, 0,
+                    255, 0, 0, 0, 255, 255, 255, 0,
+                ])
+                .unwrap();
+        });
+        let mut client = VncClient {
+            stream: DeadlineStream::new(
+                TcpStream::connect(address).unwrap(),
+                Instant::now() + Duration::from_secs(2),
+            ),
+            width: 2,
+            height: 2,
+            pixel_format: VncPixelFormat {
+                bits_per_pixel: 32,
+                big_endian: false,
+                red_max: 255,
+                green_max: 255,
+                blue_max: 255,
+                red_shift: 16,
+                green_shift: 8,
+                blue_shift: 0,
+            },
+        };
+        assert_eq!(
+            client.read_framebuffer_update().unwrap(),
+            vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]
+        );
         server.join().unwrap();
     }
 

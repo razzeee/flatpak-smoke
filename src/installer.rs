@@ -1,8 +1,4 @@
-use std::{
-    ffi::OsString,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{ffi::OsString, path::Path, time::Instant};
 
 use anyhow::bail;
 
@@ -32,7 +28,7 @@ impl<'a> ArtifactInstaller<'a> {
                 "flathub",
                 "https://flathub.org/repo/flathub.flatpakrepo",
             ],
-            self.remaining_timeout()?,
+            self.deadline,
         )?;
 
         if output.status.success() {
@@ -53,9 +49,7 @@ impl<'a> ArtifactInstaller<'a> {
                     OsString::from("--noninteractive"),
                     bundle.as_os_str().to_os_string(),
                 ],
-                self.remaining_timeout().map_err(|error| {
-                    InstallError::new(FailureReason::InstallFailed, error.to_string())
-                })?,
+                self.deadline,
             )
             .map_err(|error| InstallError::new(FailureReason::InstallFailed, error.to_string()))?;
 
@@ -70,7 +64,7 @@ impl<'a> ArtifactInstaller<'a> {
         let output = self.runner.run(
             "flatpak",
             ["list", "--user", "--app", "--columns=ref"],
-            self.remaining_timeout()?,
+            self.deadline,
         )?;
 
         if output.status.success() {
@@ -100,9 +94,7 @@ impl<'a> ArtifactInstaller<'a> {
                     OsString::from(remote_name),
                     repo.as_os_str().to_os_string(),
                 ],
-                self.remaining_timeout().map_err(|error| {
-                    InstallError::new(FailureReason::InstallFailed, error.to_string())
-                })?,
+                self.deadline,
             )
             .map_err(|error| InstallError::new(FailureReason::InstallFailed, error.to_string()))?;
 
@@ -124,9 +116,7 @@ impl<'a> ArtifactInstaller<'a> {
                     remote_name,
                     app_ref,
                 ],
-                self.remaining_timeout().map_err(|error| {
-                    InstallError::new(FailureReason::InstallFailed, error.to_string())
-                })?,
+                self.deadline,
             )
             .map_err(|error| InstallError::new(FailureReason::InstallFailed, error.to_string()))?;
 
@@ -134,15 +124,6 @@ impl<'a> ArtifactInstaller<'a> {
             Ok(())
         } else {
             Err(classify_install_error(install_output.stderr))
-        }
-    }
-
-    fn remaining_timeout(&self) -> anyhow::Result<Duration> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            bail!("overall timeout elapsed")
-        } else {
-            Ok(remaining)
         }
     }
 }
