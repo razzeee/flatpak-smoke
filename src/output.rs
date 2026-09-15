@@ -23,6 +23,7 @@ impl OutputLayout {
         if root.exists() {
             let protected = [
                 root.join("result.json"),
+                root.join("screenshots.json"),
                 root.join("screenshots"),
                 root.join("logs"),
             ];
@@ -36,6 +37,7 @@ impl OutputLayout {
 
             if force {
                 remove_if_exists(&root.join("result.json"))?;
+                remove_if_exists(&root.join("screenshots.json"))?;
                 remove_if_exists(&root.join("screenshots"))?;
                 remove_if_exists(&root.join("logs"))?;
             }

@@ -22,6 +22,7 @@ pub struct CommandOutput {
 pub struct CommandRunner {
     runner_log: PathBuf,
     env: Vec<(OsString, OsString)>,
+    clean_env: bool,
 }
 
 impl CommandRunner {
@@ -29,11 +30,17 @@ impl CommandRunner {
         Self {
             runner_log: runner_log.into(),
             env: Vec::new(),
+            clean_env: false,
         }
     }
 
     pub fn with_env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn with_clean_env(mut self) -> Self {
+        self.clean_env = true;
         self
     }
 
@@ -119,6 +126,9 @@ impl CommandRunner {
 
     pub fn command(&self, program: &str) -> Command {
         let mut command = Command::new(program);
+        if self.clean_env {
+            command.env_clear();
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }

@@ -4,6 +4,7 @@ mod installer;
 mod output;
 mod process;
 mod result;
+mod screenshot;
 mod session;
 mod tools;
 mod verify;
@@ -22,12 +23,17 @@ pub fn run() -> anyhow::Result<()> {
     process::install_signal_handlers().context("installing cancellation handlers")?;
 
     match cli.command {
-        Commands::Doctor => {
+        Commands::Doctor(args) => {
+            if args.desktop.is_some() {
+                return screenshot::doctor();
+            }
             tools::doctor().context("doctor check failed")?;
             Ok(())
         }
         Commands::VerifyBundle(args) => verify::verify_bundle(args),
         Commands::VerifyRepo(args) => verify::verify_repo(args),
+        Commands::ScreenshotBundle(args) => screenshot::bundle(args),
+        Commands::ScreenshotRepo(args) => screenshot::repo(args),
     }
 }
 

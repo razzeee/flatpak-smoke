@@ -1,0 +1,16 @@
+app-id: org.example.ScreenshotQt
+runtime: org.kde.Platform
+runtime-version: '6.9'
+sdk: org.kde.Sdk
+command: screenshot-fixture
+finish-args:
+  - --socket=wayland
+modules:
+  - name: fixture
+    buildsystem: simple
+    build-commands:
+      - c++ qt.cpp -o screenshot-fixture $(pkg-config --cflags --libs Qt6Widgets)
+      - install -Dm755 screenshot-fixture /app/bin/screenshot-fixture
+    sources:
+      - type: file
+        path: qt.cpp

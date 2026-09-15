@@ -566,13 +566,13 @@ const FRAME_OBSERVATION_TIME: Duration = Duration::from_millis(750);
 const MIN_VISIBLE_SAMPLES: usize = 3;
 
 #[derive(Default)]
-struct FrameObservation {
+pub(crate) struct FrameObservation {
     visible_since: Option<Instant>,
     samples: usize,
 }
 
 impl FrameObservation {
-    fn observe(&mut self, visible: bool, now: Instant) -> bool {
+    pub(crate) fn observe(&mut self, visible: bool, now: Instant) -> bool {
         if !visible {
             *self = Self::default();
             return false;
@@ -1134,7 +1134,7 @@ struct OcrWord {
     height: i32,
 }
 
-fn find_ocr_text_matches(tsv: &str, text: &str) -> Vec<(i32, i32)> {
+pub(crate) fn find_ocr_text_matches(tsv: &str, text: &str) -> Vec<(i32, i32)> {
     let needle = normalized_ocr_words(text);
     if needle.is_empty() {
         return Vec::new();
