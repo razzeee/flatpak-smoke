@@ -6,6 +6,10 @@ Headless smoke testing for Flatpak application builds.
 
 It is intended for build pipelines that need a fast answer to: "does this freshly built Flatpak install and show a real application window?"
 
+It also captures native application-window screenshots using an author-written
+recipe in a headless GNOME session. These commands produce ordered PNGs and
+captions for app listings. See [Screenshot recipes](#screenshot-recipes).
+
 ## Basic Usage
 
 From a source checkout, run the CLI through Cargo. The `--` separates Cargo arguments from `flatpak-smoke` arguments.
@@ -269,3 +273,155 @@ python3 tests/fixture_modes.py
 
 CI runs these checks on pull requests and retains each mode's result and images
 under `target/fixture-modes/`.
+
+## Screenshot recipes
+
+`screenshot-bundle` and `screenshot-repo` capture Wayland app windows in an
+isolated GNOME session. They include native decorations, shadows, rounded
+corners, and transparency. Listing images contain neither the desktop wallpaper
+nor the pointer. The tool saves native pixels without adding shadows or scaling
+the exported PNG.
+
+```sh
+flatpak-smoke screenshot-bundle ./org.example.App.flatpak \
+  --recipe ./screenshots.yml --output ./capture-output \
+  --allow-network-remotes
+
+flatpak-smoke screenshot-repo ./repo app/org.example.App/x86_64/stable \
+  --recipe ./screenshots.yml --output ./capture-output
+```
+
+The first backend supports GNOME Shell **48**, tested with 48.7. The dedicated
+image supplies its dependencies, English locale, and platform-default appearance:
+
+```sh
+docker build -t flatpak-smoke-screenshots -f Containerfile.screenshots .
+docker run --rm --privileged --tmpfs /run \
+  -v "$PWD:/workspace" -w /workspace \
+  flatpak-smoke-screenshots \
+  flatpak-smoke screenshot-bundle ./org.example.App.flatpak \
+  --recipe ./screenshots.yml --output ./capture-output \
+  --allow-network-remotes
+```
+
+Use `--tmpfs /run` for the container's private runtime state and system bus. The
+entrypoint starts that system bus, then executes the supplied command. A host
+installation needs the same GNOME version and dependencies; check them with:
+
+```sh
+flatpak-smoke doctor --desktop gnome
+```
+
+### Writing a recipe
+
+```yaml
+version: 1
+desktop: gnome
+language: en
+window:
+  width: 900
+  height: 600
+steps:
+  - wait_text: Ready to capture
+  - capture:
+      name: overview
+      caption: Browse the initial view
+  - type_text: example
+  - key: Return
+  - wait_text: Results for example
+    timeout: 15s
+  - capture:
+      name: search
+      caption: Find items by name
+  - click_text: Preferences
+  - select_window:
+      title: Preferences
+  - capture:
+      name: preferences
+      caption: Choose how the app behaves
+```
+
+This example runs against the GTK and Qt screenshot fixtures in `fixtures/screenshot/`.
+Adapt labels, shortcuts, and capture points to your app. Each step contains
+exactly one action and an optional `timeout`:
+
+| Action | Behavior |
+| --- | --- |
+| `click_text` | Click a unique OCR label in the selected window. Missing or ambiguous labels fail with candidate locations logged. |
+| `type_text` | Insert literal UTF-8 text through the focused control's accessibility interface, preserving its caret/selection and verifying the resulting text. Controls without an accessible editable-text interface fail explicitly. |
+| `key` | Send a key or chord, such as `Return`, `Escape`, `Tab`, `Alt+F4`, or `Ctrl+comma`. |
+| `wait_text` | Poll the selected window until normalized text appears. Use this to confirm navigation or text entry. |
+| `select_window` | Wait for an app-owned window with an exact `title`, then retain its window handle. Multiple matches fail. |
+| `capture` | Observe visible content, then save a named native-window image with its caption. |
+
+Supported modifiers are `Ctrl`, `Shift`, `Alt`, and `Super`. Keys include printable
+ASCII characters, `space`, `comma`, `plus`, `Return`, `Escape`, `Tab`, `BackSpace`,
+`Delete`, arrow keys, `Home`, `End`, `PageUp`, `PageDown`, and `F1` through `F12`.
+
+Capture names must be unique and contain only ASCII letters, digits, hyphens, or
+underscores. Captions must be nonempty single lines without a trailing full stop.
+The first capture is the default listing image; arrange the recipe accordingly.
+
+The initial window defaults to 900×600 logical pixels and is unmaximized before
+capture. Set `window.title` when the app has several principal windows. Requested
+and secondary-window sizes must fit within 1000×700 logical pixels. Shadows can
+extend the PNG beyond the frame dimensions. Version one supports English and
+scale factor one. The desktop is selected explicitly, not inferred from the
+Flatpak runtime; a future KDE backend can use the same recipe actions.
+
+Screenshot commands default to a five-minute overall timeout, 30 seconds for
+desktop startup, 30 seconds for initial window readiness, and ten seconds per
+recipe step. Override these with `--overall-timeout`, `--display-timeout`,
+`--window-timeout`, and `--screenshot-timeout`. Per-step timeouts are bounded by
+the overall deadline. Readiness permits animation and requires at least three
+visible samples spanning 750ms.
+
+The content check measures the window interior, excluding shadows, an eight-pixel
+edge inset, and the upper header region, up to 64 logical pixels. This prevents
+decorations alone from qualifying a blank client area. It is a heuristic; recipes
+for apps whose meaningful content is confined to the header need a populated
+view before capture. The exported image still contains the complete native window.
+
+### Images and metadata
+
+The output directory contains `result.json`, `screenshots.json`, listing PNGs
+under `screenshots/`, and diagnostics under `logs/`. For the example above:
+
+```text
+screenshots/000-overview.png
+screenshots/001-search.png
+screenshots/002-preferences.png
+```
+
+`screenshots.json` has its own schema version and records desktop/version,
+language, scale, app ref, recipe version, and ordered `captures`. Each capture
+contains its name, relative path, caption, PNG dimensions, and logical window
+dimensions. `failed_step_index` is zero-based, or null on success and for failures
+outside recipe execution. Earlier completed captures remain available on failure.
+`result.json` uses the existing run-result schema.
+
+OCR uses separate enlarged diagnostic images, including a contrast pass for small
+button labels. These copies and their TSV output stay under `logs/`; they never
+replace listing PNGs. Failed runs also retain the last complete candidate image.
+Use `--force` to replace an existing capture output, including its screenshot manifest.
+
+### Content and future data bundles
+
+Every screenshot run starts with its own home, desktop configuration, Flatpak
+installation, and per-app data. It does not reuse the caller's application profile,
+theme, or language settings. This also makes repeated recipes start from the same
+fresh state.
+
+The private session enables accessibility for confirmed text entry. `doctor
+--desktop gnome` starts a temporary headless session and contacts the native
+helper and accessibility bus, in addition to checking installed tools.
+
+Authors still select useful content and review the images against the
+[Flathub quality guidelines](https://docs.flathub.org/docs/for-app-authors/metainfo-guidelines/quality-guidelines#screenshots).
+Default data can leave a content-oriented app in an empty state. Passing a recipe
+does not certify the editorial quality of its screenshots or publish them.
+
+The data-preparation step runs after installation and before desktop/app launch.
+A future importer can restore author-provided data there. Export from a normal
+user session, external-document mapping, and a portable bundle format are future
+work; version one has no data import/export command.

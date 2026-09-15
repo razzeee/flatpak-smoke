@@ -1,0 +1,24 @@
+version: 1
+desktop: gnome
+language: en
+window:
+  width: 900
+  height: 600
+steps:
+  - wait_text: Ready to capture
+  - capture:
+      name: overview
+      caption: Browse the initial view
+  - type_text: example
+  - key: Return
+  - wait_text: Results for example
+  - capture:
+      name: search
+      caption: Find items by name
+  - click_text: Preferences
+  - select_window:
+      title: Preferences
+  - wait_text: Choose how the app behaves
+  - capture:
+      name: preferences
+      caption: Choose how the app behaves

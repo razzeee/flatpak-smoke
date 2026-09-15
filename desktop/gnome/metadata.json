@@ -1,0 +1,7 @@
+{
+  "uuid": "capture@flatpak-smoke",
+  "name": "Flatpak smoke capture",
+  "description": "Window control for an isolated flatpak-smoke screenshot session",
+  "shell-version": ["48"],
+  "version": 1
+}

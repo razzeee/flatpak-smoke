@@ -19,8 +19,54 @@ pub enum Commands {
     VerifyBundle(VerifyBundleArgs),
     /// Verify an app ref from a local Flatpak OSTree repository.
     VerifyRepo(VerifyRepoArgs),
+    /// Capture native application windows from a bundle using a recipe.
+    ScreenshotBundle(ScreenshotBundleArgs),
+    /// Capture native application windows from a local repository using a recipe.
+    ScreenshotRepo(ScreenshotRepoArgs),
     /// Check required host/container tooling.
-    Doctor,
+    Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Check the GNOME screenshot toolchain instead of Weston verification tools.
+    #[arg(long, value_parser = ["gnome"])]
+    pub desktop: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ScreenshotBundleArgs {
+    pub bundle: PathBuf,
+    #[command(flatten)]
+    pub common: ScreenshotArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ScreenshotRepoArgs {
+    pub repo: PathBuf,
+    pub app_ref: String,
+    #[command(flatten)]
+    pub common: ScreenshotArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ScreenshotArgs {
+    #[arg(long)]
+    pub recipe: PathBuf,
+    #[arg(long)]
+    pub output: PathBuf,
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long)]
+    pub allow_network_remotes: bool,
+    #[arg(long, value_parser = parse_duration, default_value = "5m")]
+    pub overall_timeout: Duration,
+    #[arg(long, value_parser = parse_duration, default_value = "30s")]
+    pub display_timeout: Duration,
+    #[arg(long, value_parser = parse_duration, default_value = "30s")]
+    pub window_timeout: Duration,
+    #[arg(long, value_parser = parse_duration, default_value = "10s")]
+    pub screenshot_timeout: Duration,
 }
 
 #[derive(Debug, Args)]
@@ -86,7 +132,12 @@ pub fn parse_duration(input: &str) -> Result<Duration, String> {
     }
 
     if let Some(minutes) = input.strip_suffix('m') {
-        return parse_positive_u64(minutes, input).map(|value| Duration::from_secs(value * 60));
+        return parse_positive_u64(minutes, input).and_then(|value| {
+            value
+                .checked_mul(60)
+                .map(Duration::from_secs)
+                .ok_or_else(|| "duration is too large".to_string())
+        });
     }
 
     parse_positive_u64(input, input).map(Duration::from_secs)

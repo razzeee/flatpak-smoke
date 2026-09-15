@@ -1,0 +1,34 @@
+FROM rust:1-trixie AS builder
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY desktop ./desktop
+RUN cargo build --release --locked
+
+FROM debian:trixie-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates dbus dbus-user-session flatpak gnome-shell gnome-keyring \
+    gsettings-desktop-schemas adwaita-icon-theme fonts-cantarell locales \
+    python3 python3-gi gir1.2-gio-2.0 at-spi2-core gir1.2-atspi-2.0 imagemagick tesseract-ocr tesseract-ocr-eng \
+    xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk \
+    libgl1-mesa-dri libegl-mesa0 \
+    && localedef -i en_US -f UTF-8 en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+ENV LANG=en_US.UTF-8
+COPY desktop/container-entrypoint.sh /usr/local/bin/screenshot-entrypoint
+ENTRYPOINT ["sh", "/usr/local/bin/screenshot-entrypoint"]
+
+FROM runtime AS native-tests
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gir1.2-gtk-4.0 gir1.2-adw-1 python3-pyqt6 qt6-wayland kde-style-breeze \
+    && rm -rf /var/lib/apt/lists/*
+
+# Read-only system runtimes avoid downloading them for each isolated test app.
+FROM native-tests AS e2e-tests
+RUN flatpak remote-add --system flathub https://flathub.org/repo/flathub.flatpakrepo \
+    && flatpak install --system --noninteractive flathub org.gnome.Platform//49 org.kde.Platform//6.9
+COPY --from=builder /src/target/release/flatpak-smoke /usr/local/bin/flatpak-smoke
+
+FROM runtime AS final
+COPY --from=builder /src/target/release/flatpak-smoke /usr/local/bin/flatpak-smoke
+CMD ["flatpak-smoke", "doctor", "--desktop", "gnome"]

@@ -1,0 +1,15 @@
+app-id: org.example.ScreenshotGtk
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: screenshot-fixture
+finish-args:
+  - --socket=wayland
+modules:
+  - name: fixture
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 gtk.py /app/bin/screenshot-fixture
+    sources:
+      - type: file
+        path: gtk.py
