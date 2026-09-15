@@ -1,11 +1,12 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     ffi::{OsStr, OsString},
     fs::{self, File},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::Stdio,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -20,7 +21,8 @@ use num_bigint::BigUint;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::process::{
-    BoundedCommand, DeadlineStream, ManagedChild as Child, remaining, sleep_before,
+    BoundedCommand, DeadlineStream, HealthCheck, ManagedChild as Child, remaining, sleep_before,
+    sleep_before_checked,
 };
 use crate::{command::ensure_file_nonempty, output::OutputLayout, result::FailureReason};
 
@@ -67,16 +69,36 @@ impl<'a> SessionRunner<'a> {
             ))
             .map_err(SessionError::internal)?;
 
-        let mut weston = self.start_weston(&display, vnc_port)?;
+        let weston = Rc::new(RefCell::new(self.start_weston(&display, vnc_port)?));
         let session_result = self.run_app_session(
             app_ref,
             screenshot_name,
             screenshots_after_click,
             &display,
             vnc_port,
+            weston.clone(),
         );
-        terminate_child(&mut weston);
-        session_result
+        let compositor = SessionProcesses {
+            weston: weston.clone(),
+            app: None,
+        };
+        let session_result = match compositor.check() {
+            Ok(()) => session_result,
+            Err(error) => Err(error.with_screenshots(match session_result {
+                Ok(success) => success.screenshot_paths,
+                Err(previous) => previous.screenshots,
+            })),
+        };
+        terminate_child(&mut weston.borrow_mut());
+        session_result.map_err(|mut error| {
+            let candidate = self.layout.logs_dir.join("last-candidate.png");
+            if candidate.is_file() {
+                error
+                    .screenshots
+                    .push("logs/last-candidate.png".to_string());
+            }
+            error
+        })
     }
 
     fn run_app_session(
@@ -86,28 +108,37 @@ impl<'a> SessionRunner<'a> {
         screenshots_after_click: &[String],
         display: &str,
         vnc_port: u16,
+        weston: Rc<RefCell<Child>>,
     ) -> Result<SessionSuccess, SessionError> {
         let launch_started = Instant::now();
-        let screenshotter = Screenshotter::new(
+        let mut processes = SessionProcesses { weston, app: None };
+        let mut screenshotter = Screenshotter::new(
             display,
             vnc_port,
             self.env.clone(),
             self.layout.runner_log.clone(),
             self.overall_deadline,
         );
+        screenshotter.health = processes.health_check();
         screenshotter.deadline.set(
             self.overall_deadline
                 .min(Instant::now() + self.screenshot_timeout),
         );
-        let mut session_client = VncClient::connect(vnc_port, screenshotter.deadline.get())?;
+        let mut session_client = VncClient::connect(
+            vnc_port,
+            screenshotter.deadline.get(),
+            screenshotter.health.clone(),
+        )?;
         let baseline_path = self.layout.logs_dir.join("wayland-baseline.png");
         screenshotter.capture_once_with_client(&mut session_client, &baseline_path)?;
 
         let _keyring_cleanup = KeyringCleanup(&self.env);
-        let mut app = self.spawn_app(app_ref, display)?;
+        let app = Rc::new(RefCell::new(self.spawn_app(app_ref, display)?));
+        processes.app = Some(app.clone());
+        screenshotter.health = processes.health_check();
+        let mut screenshots = Vec::new();
         let result = (|| {
             self.wait_for_app_frame(
-                &mut app,
                 &screenshotter,
                 &mut session_client,
                 &baseline_path,
@@ -115,19 +146,8 @@ impl<'a> SessionRunner<'a> {
             )?;
             let launch_to_window = launch_started.elapsed().as_millis();
 
-            if let Some(status) = app.try_wait().map_err(SessionError::internal)? {
-                return Err(SessionError::new(
-                    FailureReason::EarlyExit,
-                    format!("app exited before screenshot with {status}"),
-                ));
-            }
-
-            sleep_before(Duration::from_millis(500), self.overall_deadline)
-                .map_err(SessionError::internal)?;
-
             let mut screenshot_path = self.layout.screenshot_path(screenshot_name);
             let relative_screenshot_path = self.layout.relative_screenshot_path(screenshot_name);
-            let mut screenshots = Vec::new();
             self.capture_required_screenshot(
                 &screenshotter,
                 &mut session_client,
@@ -144,7 +164,7 @@ impl<'a> SessionRunner<'a> {
                     FailureReason::AppErrorWindow,
                     format!("screenshot text matched app error marker '{marker}'"),
                 )
-                .with_screenshots(screenshots));
+                .with_screenshots(screenshots.clone()));
             }
 
             for (index, click_text) in screenshots_after_click.iter().enumerate() {
@@ -164,8 +184,12 @@ impl<'a> SessionRunner<'a> {
                 screenshotter
                     .click_with_client(&mut session_client, click_target)
                     .map_err(|error| error.with_screenshots(screenshots.clone()))?;
-                sleep_before(Duration::from_millis(500), self.overall_deadline)
-                    .map_err(SessionError::internal)?;
+                sleep_before_checked(
+                    Duration::from_millis(500),
+                    self.overall_deadline,
+                    &screenshotter.health,
+                )
+                .map_err(SessionError::internal)?;
 
                 let next_path = self.capture_changed_screenshot(
                     &screenshotter,
@@ -183,7 +207,7 @@ impl<'a> SessionRunner<'a> {
                         FailureReason::AppErrorWindow,
                         format!("screenshot text matched app error marker '{marker}'"),
                     )
-                    .with_screenshots(screenshots));
+                    .with_screenshots(screenshots.clone()));
                 }
 
                 screenshot_path = next_path;
@@ -193,12 +217,17 @@ impl<'a> SessionRunner<'a> {
                 SessionError::internal(error).with_screenshots(screenshots.clone())
             })?;
             Ok(SessionSuccess {
-                screenshot_paths: screenshots,
+                screenshot_paths: screenshots.clone(),
                 launch_to_window_ms: launch_to_window,
             })
         })();
 
-        terminate_child(&mut app);
+        // Prefer a process exit over a secondary OCR/socket error caused by that exit.
+        let result = processes
+            .check()
+            .and(result)
+            .map_err(|error| error.with_screenshots(screenshots));
+        terminate_child(&mut app.borrow_mut());
         result
     }
 
@@ -260,12 +289,15 @@ impl<'a> SessionRunner<'a> {
                 Err(error) => last_error = Some(error.message),
             }
 
-            sleep_before(Duration::from_millis(200), screenshotter.deadline.get()).map_err(
-                |error| {
-                    SessionError::new(FailureReason::ScreenshotFailed, error.to_string())
-                        .with_screenshots(screenshots.clone())
-                },
-            )?;
+            sleep_before_checked(
+                Duration::from_millis(200),
+                screenshotter.deadline.get(),
+                &screenshotter.health,
+            )
+            .map_err(|error| {
+                SessionError::new(FailureReason::ScreenshotFailed, error.to_string())
+                    .with_screenshots(screenshots.clone())
+            })?;
         }
 
         Err(SessionError::new(
@@ -393,7 +425,6 @@ impl<'a> SessionRunner<'a> {
 
     fn wait_for_app_frame(
         &self,
-        app: &mut Child,
         screenshotter: &Screenshotter,
         client: &mut VncClient,
         baseline_path: &Path,
@@ -404,44 +435,66 @@ impl<'a> SessionRunner<'a> {
             .deadline
             .set(self.overall_deadline.min(started + timeout));
         let candidate_path = self.layout.logs_dir.join("wayland-window-detection.png");
-        while started.elapsed() < timeout {
-            if let Some(status) = app.try_wait().map_err(SessionError::internal)? {
-                return Err(SessionError::new(
-                    FailureReason::EarlyExit,
-                    format!("app exited before a visible Wayland frame appeared with {status}"),
-                ));
-            }
-
-            screenshotter.capture_once_with_client(client, &candidate_path)?;
-            if screenshotter.screenshots_differ(baseline_path, &candidate_path)?
-                && screenshotter.screenshot_has_content(&candidate_path)?
-            {
-                self.layout
+        let mut observation = FrameObservation::default();
+        let result = (|| {
+            while started.elapsed() < timeout {
+                screenshotter
+                    .health
+                    .check()
+                    .map_err(SessionError::internal)?;
+                screenshotter.capture_once_with_client(client, &candidate_path)?;
+                let visible = screenshotter.screenshots_differ(baseline_path, &candidate_path)?
+                    && screenshotter.screenshot_has_content(&candidate_path)?;
+                if visible && observation.samples == 0 {
+                    self.layout
+                        .append_runner_log("first visible sample; observing app content")
+                        .map_err(SessionError::internal)?;
+                }
+                if observation.observe(visible, Instant::now()) {
+                    self.layout
                     .append_runner_log(
-                        "visible Wayland frame detected from non-empty screenshot content",
+                        "visible app content persisted for at least 750ms across at least 3 samples",
                     )
                     .map_err(SessionError::internal)?;
-                return Ok(());
+                    return Ok(());
+                }
+
+                if let Err(error) = sleep_before_checked(
+                    Duration::from_millis(200),
+                    screenshotter.deadline.get(),
+                    &screenshotter.health,
+                ) {
+                    remaining(self.overall_deadline).map_err(SessionError::internal)?;
+                    return Err(SessionError::new(
+                        FailureReason::WindowTimeout,
+                        error.to_string(),
+                    ));
+                }
             }
 
-            if let Err(error) =
-                sleep_before(Duration::from_millis(200), screenshotter.deadline.get())
+            Err(SessionError::new(
+                FailureReason::WindowTimeout,
+                format!(
+                    "no persistent visible app content appeared within {}s",
+                    timeout.as_secs()
+                ),
+            ))
+        })();
+        result.map_err(|error| {
+            if Instant::now() >= screenshotter.deadline.get()
+                && remaining(self.overall_deadline).is_ok()
             {
-                remaining(self.overall_deadline).map_err(SessionError::internal)?;
-                return Err(SessionError::new(
+                SessionError::new(
                     FailureReason::WindowTimeout,
-                    error.to_string(),
-                ));
+                    format!(
+                        "no persistent visible app content appeared within {}s",
+                        timeout.as_secs()
+                    ),
+                )
+            } else {
+                error
             }
-        }
-
-        Err(SessionError::new(
-            FailureReason::WindowTimeout,
-            format!(
-                "no visible Wayland frame appeared within {}s",
-                timeout.as_secs()
-            ),
-        ))
+        })
     }
 
     fn bounded_timeout(&self, requested: Duration) -> Result<Duration, SessionError> {
@@ -509,6 +562,70 @@ impl<'a> SessionRunner<'a> {
 
 const WAYLAND_DISPLAY: &str = "flatpak-smoke-wayland";
 
+const FRAME_OBSERVATION_TIME: Duration = Duration::from_millis(750);
+const MIN_VISIBLE_SAMPLES: usize = 3;
+
+#[derive(Default)]
+struct FrameObservation {
+    visible_since: Option<Instant>,
+    samples: usize,
+}
+
+impl FrameObservation {
+    fn observe(&mut self, visible: bool, now: Instant) -> bool {
+        if !visible {
+            *self = Self::default();
+            return false;
+        }
+        let since = *self.visible_since.get_or_insert(now);
+        self.samples += 1;
+        self.samples >= MIN_VISIBLE_SAMPLES && now.duration_since(since) >= FRAME_OBSERVATION_TIME
+    }
+}
+
+#[derive(Clone)]
+struct SessionProcesses {
+    weston: Rc<RefCell<Child>>,
+    app: Option<Rc<RefCell<Child>>>,
+}
+
+impl SessionProcesses {
+    fn check(&self) -> Result<(), SessionError> {
+        if let Some(status) = self
+            .weston
+            .borrow_mut()
+            .try_wait()
+            .map_err(SessionError::internal)?
+        {
+            return Err(SessionError::new(
+                FailureReason::DisplayExited,
+                format!("Weston exited during verification with {status}"),
+            ));
+        }
+        if let Some(app) = &self.app
+            && let Some(status) = app
+                .borrow_mut()
+                .try_wait()
+                .map_err(SessionError::internal)?
+        {
+            return Err(SessionError::new(
+                FailureReason::EarlyExit,
+                format!("app exited during verification with {status}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn health_check(&self) -> HealthCheck {
+        let processes = self.clone();
+        HealthCheck::new(move || {
+            processes
+                .check()
+                .map_err(|error| std::io::Error::other(error.message))
+        })
+    }
+}
+
 const START_DESKTOP_SERVICES_AND_RUN_FLATPAK: &str = r#"
 set -eu
 printf '\n' | gnome-keyring-daemon --unlock --components=secrets >/dev/null
@@ -548,6 +665,7 @@ impl SessionError {
 }
 
 struct Screenshotter {
+    health: HealthCheck,
     deadline: Cell<Instant>,
     overall_deadline: Instant,
     display: String,
@@ -565,6 +683,7 @@ impl Screenshotter {
         deadline: Instant,
     ) -> Self {
         Self {
+            health: HealthCheck::default(),
             deadline: Cell::new(deadline),
             overall_deadline: deadline,
             display: display.to_string(),
@@ -586,12 +705,17 @@ impl Screenshotter {
         let mut last_error = None;
 
         while started.elapsed() < timeout {
+            self.health.check().map_err(SessionError::internal)?;
             match self.capture_once_with_client(client, path) {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = Some(error.message),
             }
 
-            if let Err(error) = sleep_before(Duration::from_millis(200), self.deadline.get()) {
+            if let Err(error) = sleep_before_checked(
+                Duration::from_millis(200),
+                self.deadline.get(),
+                &self.health,
+            ) {
                 last_error = Some(error.to_string());
                 break;
             }
@@ -610,7 +734,8 @@ impl Screenshotter {
     }
 
     fn capture_once(&self, path: &Path) -> Result<(), SessionError> {
-        let mut client = VncClient::connect(self.vnc_port, self.deadline.get())?;
+        let mut client =
+            VncClient::connect(self.vnc_port, self.deadline.get(), self.health.clone())?;
         client.capture_png(path)?;
         self.append_log(format!("screenshot captured at '{}'", path.display()))?;
         Ok(())
@@ -622,6 +747,7 @@ impl Screenshotter {
         target: (i32, i32),
     ) -> Result<(), SessionError> {
         client.stream.deadline = self.deadline.get();
+        client.stream.health = self.health.clone();
         client.click(target)?;
         self.append_log(format!(
             "clicked screenshot target at {},{}",
@@ -636,7 +762,11 @@ impl Screenshotter {
         path: &Path,
     ) -> Result<(), SessionError> {
         client.stream.deadline = self.deadline.get();
+        client.stream.health = self.health.clone();
         client.capture_png(path)?;
+        // Keep a complete candidate even if the next capture or image check fails.
+        let candidate = self.runner_log.with_file_name("last-candidate.png");
+        fs::copy(path, candidate).map_err(SessionError::internal)?;
         self.append_log(format!("screenshot captured at '{}'", path.display()))?;
         Ok(())
     }
@@ -669,7 +799,7 @@ impl Screenshotter {
             .arg(baseline)
             .arg(candidate)
             .arg("null:")
-            .output_before(self.deadline.get());
+            .output_before_checked(self.deadline.get(), &self.health);
 
         match output {
             Ok(output) if output.status.success() => Ok(false),
@@ -704,7 +834,7 @@ impl Screenshotter {
             .command("identify")
             .args(["-format", "%[fx:standard_deviation]"])
             .arg(path)
-            .output_before(self.deadline.get());
+            .output_before_checked(self.deadline.get(), &self.health);
 
         match output {
             Ok(output) if output.status.success() => {
@@ -745,7 +875,7 @@ impl Screenshotter {
             .arg(path)
             .arg("stdout")
             .args(["--psm", "6"])
-            .output_before(self.deadline.get());
+            .output_before_checked(self.deadline.get(), &self.health);
 
         match output {
             Ok(output) if output.status.success() => {
@@ -787,7 +917,7 @@ impl Screenshotter {
             .arg(path)
             .arg("stdout")
             .args(["--psm", "6", "tsv"])
-            .output_before(self.deadline.get());
+            .output_before_checked(self.deadline.get(), &self.health);
 
         match output {
             Ok(output) if output.status.success() => {
@@ -843,7 +973,7 @@ impl Screenshotter {
                 "8",
                 "null:",
             ])
-            .output_before(self.deadline.get());
+            .output_before_checked(self.deadline.get(), &self.health);
 
         match output {
             Ok(output) if output.status.success() => {
@@ -898,7 +1028,7 @@ impl Screenshotter {
             .args(["-crop", &crop_geometry])
             .args(["-resize", "400%", "-alpha", "off", "-colorspace", "Gray"])
             .arg(&crop_path)
-            .output_before(self.deadline.get());
+            .output_before_checked(self.deadline.get(), &self.health);
 
         match output {
             Ok(output) if output.status.success() => {}
@@ -930,7 +1060,7 @@ impl Screenshotter {
             .arg(&crop_path)
             .arg("stdout")
             .args(["--psm", "7"])
-            .output_before(self.deadline.get());
+            .output_before_checked(self.deadline.get(), &self.health);
 
         match output {
             Ok(output) if output.status.success() => {
@@ -1279,7 +1409,8 @@ struct VncClient {
 }
 
 impl VncClient {
-    fn connect(port: u16, deadline: Instant) -> Result<Self, SessionError> {
+    fn connect(port: u16, deadline: Instant, health: HealthCheck) -> Result<Self, SessionError> {
+        health.check().map_err(SessionError::internal)?;
         let address: SocketAddr = ([127, 0, 0, 1], port).into();
         let stream = TcpStream::connect_timeout(
             &address,
@@ -1294,6 +1425,7 @@ impl VncClient {
             )
         })?;
         let mut stream = DeadlineStream::new(stream, deadline);
+        stream.health = health;
 
         let mut version = [0; 12];
         stream.read_exact(&mut version).map_err(vnc_read_error)?;
@@ -1329,9 +1461,10 @@ impl VncClient {
 
     fn capture_png(&mut self, path: &Path) -> Result<(), SessionError> {
         self.move_pointer(POINTER_PARK_POSITION)?;
-        sleep_before(
+        sleep_before_checked(
             Duration::from_millis(POINTER_PARK_SETTLE_MS),
             self.stream.deadline,
+            &self.stream.health,
         )
         .map_err(SessionError::internal)?;
 
@@ -1344,7 +1477,7 @@ impl VncClient {
         let output = std::process::Command::new("convert")
             .arg(&ppm_path)
             .arg(path)
-            .output_before(self.stream.deadline);
+            .output_before_checked(self.stream.deadline, &self.stream.health);
         match output {
             Ok(output) if output.status.success() => {
                 ensure_file_nonempty(path).map_err(SessionError::internal)?;
@@ -1372,14 +1505,26 @@ impl VncClient {
         let x = target.0.clamp(0, i32::from(self.width.saturating_sub(1))) as u16;
         let y = target.1.clamp(0, i32::from(self.height.saturating_sub(1))) as u16;
         self.pointer_event(0, x, y)?;
-        sleep_before(Duration::from_millis(150), self.stream.deadline)
-            .map_err(SessionError::internal)?;
+        sleep_before_checked(
+            Duration::from_millis(150),
+            self.stream.deadline,
+            &self.stream.health,
+        )
+        .map_err(SessionError::internal)?;
         self.pointer_event(1, x, y)?;
-        sleep_before(Duration::from_millis(100), self.stream.deadline)
-            .map_err(SessionError::internal)?;
+        sleep_before_checked(
+            Duration::from_millis(100),
+            self.stream.deadline,
+            &self.stream.health,
+        )
+        .map_err(SessionError::internal)?;
         self.pointer_event(0, x, y)?;
-        sleep_before(Duration::from_millis(500), self.stream.deadline)
-            .map_err(SessionError::internal)?;
+        sleep_before_checked(
+            Duration::from_millis(500),
+            self.stream.deadline,
+            &self.stream.health,
+        )
+        .map_err(SessionError::internal)?;
         Ok(())
     }
 
@@ -1970,6 +2115,131 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn transient_content_does_not_satisfy_readiness() {
+        let started = Instant::now();
+        let mut observation = FrameObservation::default();
+        assert!(!observation.observe(true, started));
+        assert!(!observation.observe(true, started + Duration::from_millis(400)));
+        assert!(!observation.observe(false, started + Duration::from_millis(600)));
+        assert!(!observation.observe(true, started + Duration::from_millis(800)));
+        assert!(!observation.observe(true, started + Duration::from_millis(1200)));
+        assert!(observation.observe(true, started + Duration::from_millis(1600)));
+    }
+
+    #[test]
+    fn readiness_requires_elapsed_time_and_multiple_samples() {
+        let started = Instant::now();
+        let mut observation = FrameObservation::default();
+        assert!(!observation.observe(true, started));
+        assert!(!observation.observe(true, started + FRAME_OBSERVATION_TIME));
+        assert!(observation.observe(
+            true,
+            started + FRAME_OBSERVATION_TIME + Duration::from_millis(200)
+        ));
+
+        let mut observation = FrameObservation::default();
+        for millis in [0, 100, 200, 300] {
+            assert!(!observation.observe(true, started + Duration::from_millis(millis)));
+        }
+        assert!(observation.observe(true, started + FRAME_OBSERVATION_TIME));
+    }
+
+    fn sleeping_process() -> Rc<RefCell<Child>> {
+        Rc::new(RefCell::new(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn_managed()
+                .unwrap(),
+        ))
+    }
+
+    #[test]
+    fn process_exits_interrupt_ocr_before_its_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        for compositor in [false, true] {
+            let processes = SessionProcesses {
+                weston: sleeping_process(),
+                app: Some(sleeping_process()),
+            };
+            let watched = if compositor {
+                &processes.weston
+            } else {
+                processes.app.as_ref().unwrap()
+            };
+            let temp = tempfile::tempdir().unwrap();
+            let helper = temp.path().join("tesseract");
+            fs::write(
+                &helper,
+                "#!/bin/sh\nkill -KILL \"$WATCH_PID\"\nexec /bin/sleep 30\n",
+            )
+            .unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+            let started = Instant::now();
+            let mut screenshotter = Screenshotter::new(
+                "unused",
+                0,
+                vec![
+                    (OsString::from("PATH"), temp.path().as_os_str().to_owned()),
+                    (
+                        OsString::from("WATCH_PID"),
+                        OsString::from(watched.borrow().id().to_string()),
+                    ),
+                ],
+                temp.path().join("runner.log"),
+                started + Duration::from_secs(10),
+            );
+            screenshotter.health = processes.health_check();
+            let result = screenshotter.detect_app_error_text(&temp.path().join("frame.png"));
+            let error = processes.check().and(result).unwrap_err();
+            assert_eq!(
+                error.reason,
+                if compositor {
+                    FailureReason::DisplayExited
+                } else {
+                    FailureReason::EarlyExit
+                }
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+    }
+
+    #[test]
+    fn compositor_exit_interrupts_stalled_vnc_handshake() {
+        let processes = SessionProcesses {
+            weston: sleeping_process(),
+            app: None,
+        };
+        let pid = processes.weston.borrow().id() as i32;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(50));
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            // Stay connected until the client abandons the handshake.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let _ = stream.read(&mut [0; 1]);
+        });
+        let started = Instant::now();
+        let result = VncClient::connect(
+            port,
+            started + Duration::from_secs(10),
+            processes.health_check(),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            processes.check().unwrap_err().reason,
+            FailureReason::DisplayExited
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn stalled_vnc_handshake_obeys_deadline() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1978,9 +2248,13 @@ mod tests {
             thread::sleep(Duration::from_millis(500));
         });
         let started = Instant::now();
-        let error = VncClient::connect(port, started + Duration::from_millis(100))
-            .err()
-            .unwrap();
+        let error = VncClient::connect(
+            port,
+            started + Duration::from_millis(100),
+            HealthCheck::default(),
+        )
+        .err()
+        .unwrap();
         assert!(
             error.message.contains("deadline elapsed"),
             "{}",
