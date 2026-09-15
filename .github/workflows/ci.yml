@@ -105,6 +105,17 @@ jobs:
             target/fixture-smoke-output/logs/**
             target/fixture-smoke-output/screenshots/**
 
+      - name: Verify readiness and exit fixture modes
+        run: python3 tests/fixture_modes.py
+
+      - name: Upload fixture mode outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fixture-mode-outputs
+          if-no-files-found: warn
+          path: target/fixture-modes/**
+
   flathub-end-to-end:
     name: Flathub end-to-end smoke tests
     runs-on: ubuntu-latest

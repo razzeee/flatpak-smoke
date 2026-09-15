@@ -4,6 +4,7 @@ use std::{
     ops::{Deref, DerefMut},
     os::unix::process::CommandExt,
     process::{Child, Command, Output, Stdio},
+    rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant},
@@ -12,6 +13,20 @@ use std::{
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CLEANUP_GRACE: Duration = Duration::from_millis(200);
+
+/// Optional run-local check, shared by subprocess polling, sockets, and delays.
+#[derive(Clone, Default)]
+pub struct HealthCheck(Option<Rc<dyn Fn() -> io::Result<()>>>);
+
+impl HealthCheck {
+    pub fn new(check: impl Fn() -> io::Result<()> + 'static) -> Self {
+        Self(Some(Rc::new(check)))
+    }
+
+    pub fn check(&self) -> io::Result<()> {
+        self.0.as_ref().map_or(Ok(()), |check| check())
+    }
+}
 
 extern "C" fn cancel(_: libc::c_int) {
     CANCELLED.store(true, Ordering::Relaxed);
@@ -44,8 +59,17 @@ pub fn remaining(deadline: Instant) -> io::Result<Duration> {
 }
 
 pub fn sleep_before(duration: Duration, deadline: Instant) -> io::Result<()> {
+    sleep_before_checked(duration, deadline, &HealthCheck::default())
+}
+
+pub fn sleep_before_checked(
+    duration: Duration,
+    deadline: Instant,
+    health: &HealthCheck,
+) -> io::Result<()> {
     let until = Instant::now() + duration;
     while Instant::now() < until {
+        health.check()?;
         let budget = remaining(deadline)?;
         thread::sleep(
             budget
@@ -53,6 +77,7 @@ pub fn sleep_before(duration: Duration, deadline: Instant) -> io::Result<()> {
                 .min(until.saturating_duration_since(Instant::now())),
         );
     }
+    health.check()?;
     remaining(deadline).map(|_| ())
 }
 
@@ -108,7 +133,13 @@ impl Drop for ManagedChild {
 
 pub trait BoundedCommand {
     fn spawn_managed(&mut self) -> io::Result<ManagedChild>;
+    #[cfg(test)]
     fn output_before(&mut self, deadline: Instant) -> io::Result<Output>;
+    fn output_before_checked(
+        &mut self,
+        deadline: Instant,
+        health: &HealthCheck,
+    ) -> io::Result<Output>;
 }
 
 impl BoundedCommand for Command {
@@ -119,7 +150,17 @@ impl BoundedCommand for Command {
         Ok(ManagedChild { child, group })
     }
 
+    #[cfg(test)]
     fn output_before(&mut self, deadline: Instant) -> io::Result<Output> {
+        self.output_before_checked(deadline, &HealthCheck::default())
+    }
+
+    fn output_before_checked(
+        &mut self,
+        deadline: Instant,
+        health: &HealthCheck,
+    ) -> io::Result<Output> {
+        health.check()?;
         remaining(deadline)?;
         let mut stdout = tempfile::tempfile()?;
         let mut stderr = tempfile::tempfile()?;
@@ -129,11 +170,12 @@ impl BoundedCommand for Command {
             .stderr(stderr.try_clone()?)
             .spawn_managed()?;
         let status = loop {
+            health.check()?;
             remaining(deadline)?;
             if let Some(status) = child.try_wait()? {
                 break status;
             }
-            sleep_before(POLL_INTERVAL, deadline)?;
+            sleep_before_checked(POLL_INTERVAL, deadline, health)?;
         };
         child.terminate();
         stdout.seek(SeekFrom::Start(0))?;
@@ -145,6 +187,7 @@ impl BoundedCommand for Command {
         };
         stdout.read_to_end(&mut output.stdout)?;
         stderr.read_to_end(&mut output.stderr)?;
+        health.check()?;
         Ok(output)
     }
 }
@@ -153,17 +196,23 @@ impl BoundedCommand for Command {
 pub struct DeadlineStream {
     stream: TcpStream,
     pub deadline: Instant,
+    pub health: HealthCheck,
 }
 
 impl DeadlineStream {
     pub fn new(stream: TcpStream, deadline: Instant) -> Self {
-        Self { stream, deadline }
+        Self {
+            stream,
+            deadline,
+            health: HealthCheck::default(),
+        }
     }
 }
 
 impl Read for DeadlineStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
+            self.health.check()?;
             self.stream
                 .set_read_timeout(Some(remaining(self.deadline)?.min(POLL_INTERVAL)))?;
             match self.stream.read(buf) {
@@ -184,6 +233,7 @@ impl Read for DeadlineStream {
 impl Write for DeadlineStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         loop {
+            self.health.check()?;
             self.stream
                 .set_write_timeout(Some(remaining(self.deadline)?.min(POLL_INTERVAL)))?;
             match self.stream.write(buf) {
@@ -201,6 +251,7 @@ impl Write for DeadlineStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        self.health.check()?;
         remaining(self.deadline)?;
         self.stream.flush()
     }

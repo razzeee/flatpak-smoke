@@ -75,7 +75,7 @@ For each verification run, `flatpak-smoke`:
 5. Installs the bundle or repo ref.
 6. Starts a headless Weston Wayland compositor with a local VNC backend for screenshots and pointer input.
 7. Launches the app through `dbus-run-session` and `flatpak run`.
-8. Waits for a visible Wayland frame by comparing compositor screenshots before and after launch.
+8. Waits for visible app content to persist across at least three samples spanning at least 750ms, comparing each sample with the compositor background. A blank sample restarts observation; animation is allowed.
 9. Captures screenshots and OCR-checks them for fatal error markers.
 10. Writes `result.json`.
 
@@ -87,8 +87,9 @@ A run fails when any of these happen:
 - The artifact path or app ref is invalid.
 - The app cannot be installed.
 - The headless Wayland compositor cannot start.
-- The app exits before a visible Wayland frame appears.
-- No visible Wayland frame appears before `--window-timeout`.
+- The app exits at any point before verification finishes, including during OCR or after a click. This reports `early_exit`.
+- Weston exits after startup. This reports `display_exited`.
+- Visible app content does not persist for the observation period before `--window-timeout`.
 - Screenshot OCR finds fatal markers such as `secret portal error`, `unexpected error`, `fatal error`, or `unhandled exception`.
 
 ## Screenshots
@@ -100,6 +101,11 @@ screenshots/000-window-visible.png
 ```
 
 Every requested screenshot must contain visible app content. A run fails if a screenshot file is captured but only contains a solid compositor background.
+
+The runner checks app and compositor liveness while waiting on image tools, VNC
+I/O, and interaction delays, and once more before reporting success. A short
+observation period cannot prove that startup has finished or distinguish a
+long-lived splash screen from the main window.
 
 Interaction screenshots can be requested with `--screenshot-after-click <BUTTON_LABEL>`. The label is located in the previous screenshot with OCR, with a matching primary-action visual fallback for small inverse button labels, clicked through the local Weston VNC backend, and captured as a required follow-up artifact:
 
@@ -157,6 +163,11 @@ flatpak-smoke-output/
 
 On failure, `status` is `failed` and `failure` contains a machine-readable reason plus a human-readable message.
 
+Failures retain earlier captured screenshots in `screenshots`. If a complete
+candidate frame was captured, the list also includes `logs/last-candidate.png`,
+even when that frame did not satisfy readiness or post-click checks. This
+diagnostic image may contain only the compositor background.
+
 ## Timeouts
 
 Default timeouts:
@@ -164,7 +175,7 @@ Default timeouts:
 | Option | Default | Meaning |
 | --- | ---: | --- |
 | `--display-timeout` | `10s` | Time allowed for Weston to become usable. |
-| `--window-timeout` | `30s` | Time allowed for the app to draw a visible Wayland frame. |
+| `--window-timeout` | `30s` | Time allowed for visible app content to pass the observation period. |
 | `--screenshot-timeout` | `10s` | Time allowed for each screenshot capture. |
 | `--overall-timeout` | `60s` | Total run budget. |
 
@@ -242,3 +253,19 @@ Use `--allow-network-remotes` if the bundle needs runtimes or extensions that ar
 ### The App Needs More Time
 
 Increase `--overall-timeout` and `--window-timeout` for slow installs or first launches.
+
+## Readiness regression fixtures
+
+The Wayland fixture accepts `FLATPAK_SMOKE_FIXTURE_MODE` with `normal`, `delayed`,
+`never-draw`, `crash-after-frame`, `animated`, or `exit-after-click`. The default
+is `normal`. These modes exercise delayed rendering, window timeouts, crashes
+during observation, continuously changing content, and exits during interaction.
+
+After building the container and fixture bundle, run the mode checks with:
+
+```sh
+python3 tests/fixture_modes.py
+```
+
+CI runs these checks on pull requests and retains each mode's result and images
+under `target/fixture-modes/`.
