@@ -170,6 +170,16 @@ Default timeouts:
 
 Durations support plain seconds or `ms`, `s`, and `m` suffixes.
 
+Screenshot conversion, image comparisons, OCR, and VNC reads and writes share the
+remaining stage and overall timeout budgets. Receiving partial VNC data does not
+restart the deadline. Cleanup can extend the run slightly beyond its timeout:
+each owned process group gets up to 200ms to stop before forced termination.
+
+`SIGINT` and `SIGTERM` cancel the run through the normal failure path. The runner
+cleans up its app, compositor, and helper process groups, including background
+children whose parent has already exited. The daemonized keyring unlock service
+is cleaned up separately using the run's private runtime directory.
+
 ```sh
 cargo run -- verify-bundle ./build/org.example.App.flatpak \
   --output ./flatpak-smoke-output \

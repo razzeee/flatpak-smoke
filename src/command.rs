@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::process::{BoundedCommand, remaining};
 use anyhow::{Context, bail};
 
 #[derive(Debug, Clone)]
@@ -40,12 +41,14 @@ impl CommandRunner {
         &self,
         program: &str,
         args: I,
-        timeout: Duration,
+        deadline: Instant,
     ) -> anyhow::Result<CommandOutput>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        let started = Instant::now();
+        remaining(deadline)?;
         let args: Vec<OsString> = args
             .into_iter()
             .map(|arg| arg.as_ref().to_os_string())
@@ -61,18 +64,20 @@ impl CommandRunner {
             .try_clone()
             .context("cloning command stderr temp file")?;
 
+        remaining(deadline)?;
         let mut child = self
             .command(program)
             .args(&args)
+            .stdin(Stdio::null())
             .stdout(Stdio::from(stdout_for_child))
             .stderr(Stdio::from(stderr_for_child))
-            .spawn()
+            .spawn_managed()
             .with_context(|| format!("spawning {program}"))?;
 
-        let started = Instant::now();
         loop {
-            if child.try_wait()?.is_some() {
+            if remaining(deadline).is_ok() && child.try_wait()?.is_some() {
                 let status = child.wait()?;
+                child.terminate();
                 let result = CommandOutput {
                     status,
                     stdout: read_temp_file(&mut stdout_file).context("reading command stdout")?,
@@ -82,14 +87,13 @@ impl CommandRunner {
                 return Ok(result);
             }
 
-            if started.elapsed() >= timeout {
-                let _ = child.kill();
-                let _ = child.wait();
+            if let Err(error) = remaining(deadline) {
+                child.terminate();
                 let stdout = read_temp_file(&mut stdout_file).unwrap_or_default();
                 let stderr = read_temp_file(&mut stderr_file).unwrap_or_default();
                 self.append_log(format!(
-                    "{program} timed out after {}",
-                    format_duration(timeout)
+                    "{program} stopped after {}: {error}",
+                    format_duration(started.elapsed())
                 ))?;
                 if !stdout.trim().is_empty() {
                     self.append_log(format!(
@@ -104,8 +108,8 @@ impl CommandRunner {
                     ))?;
                 }
                 bail!(
-                    "command '{program}' timed out after {}",
-                    format_duration(timeout)
+                    "command '{program}' stopped after {}: {error}",
+                    format_duration(started.elapsed())
                 );
             }
 
@@ -186,6 +190,26 @@ pub fn ensure_file_nonempty(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timed_out_command_preserves_diagnostic_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("runner.log");
+        let runner = CommandRunner::new(&log);
+        let started = Instant::now();
+        let error = runner
+            .run(
+                "sh",
+                ["-c", "echo started; echo waiting >&2; exec sleep 30"],
+                started + Duration::from_millis(150),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("deadline elapsed"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let contents = fs::read_to_string(log).unwrap();
+        assert!(contents.contains("stdout before timeout:\nstarted"));
+        assert!(contents.contains("stderr before timeout:\nwaiting"));
+    }
 
     #[test]
     fn formats_subsecond_timeouts() {

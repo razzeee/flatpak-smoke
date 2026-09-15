@@ -2,6 +2,7 @@ mod cli;
 mod command;
 mod installer;
 mod output;
+mod process;
 mod result;
 mod session;
 mod tools;
@@ -18,6 +19,7 @@ pub use result::{Artifact, Failure, FailureReason, RunResult, RunStatus, Timings
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+    process::install_signal_handlers().context("installing cancellation handlers")?;
 
     match cli.command {
         Commands::Doctor => {
