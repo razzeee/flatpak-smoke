@@ -113,6 +113,7 @@ pub enum FailureReason {
     InstallFailed,
     DependencyFailed,
     DisplayStartFailed,
+    DisplayExited,
     LaunchFailed,
     WindowTimeout,
     EarlyExit,
