@@ -1,0 +1,4 @@
+ARG CAPTURE_IMAGE=flatpak-smoke-screenshots
+FROM ${CAPTURE_IMAGE}
+COPY tests/compatibility/apps.json tests/compatibility/prepare.py /opt/compatibility/
+RUN python3 /opt/compatibility/prepare.py --output /opt/compatibility/artifacts

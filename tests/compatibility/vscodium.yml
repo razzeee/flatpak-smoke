@@ -1,0 +1,13 @@
+version: 1
+steps:
+  - wait_text: Start
+    timeout: 30s
+  - capture:
+      name: overview
+      caption: Get started with the editor
+  - key: Ctrl+comma
+  - wait_text: Settings
+    timeout: 15s
+  - capture:
+      name: settings
+      caption: Configure the editor
