@@ -142,6 +142,9 @@ impl Images<'_> {
             let output = self
                 .workspace
                 .command("tesseract")
+                // Concurrent software-rendered desktops already share the CPU.
+                // OpenMP worker pools can exhaust the OCR deadline under load.
+                .env("OMP_THREAD_LIMIT", "1")
                 .arg(image)
                 .args(["stdout", "-l", "eng", "--psm", "11", "tsv"])
                 .output_before_checked(deadline, &self.health)?;
