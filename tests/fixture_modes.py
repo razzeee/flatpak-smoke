@@ -48,6 +48,9 @@ def main():
                 assert (root / output / screenshot).stat().st_size > 0, screenshot
             stdout = (root / output / "logs/app.stdout.log").read_text()
             assert f"fixture mode: {mode}" in stdout, stdout
+            weston_log = (root / output / "logs/weston.stderr.log").read_text()
+            assert weston_log.count("New VNC client connected") == 1, (
+                "readiness and capture must share one VNC connection", weston_log)
             if reason:
                 assert "logs/last-candidate.png" in result["screenshots"], result
             else:
