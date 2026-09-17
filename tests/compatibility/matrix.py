@@ -148,6 +148,11 @@ def summary(apps, runs):
             "app": app["name"], "passed": len(passed), "failed": len(selected) - len(passed),
             "mixed_outcomes": 0 < len(passed) < len(selected),
             "geometry_consistent": all(len(values) == 1 for values in geometry.values()),
+            "concurrent_overlap": any(
+                first["phase"] == second["phase"] == "concurrent"
+                and max(first["started"], second["started"]) < min(first["finished"], second["finished"])
+                for index, first in enumerate(selected) for second in selected[index + 1:]
+            ),
             "pixel_variants": {name: len(values) for name, values in pixels.items()},
         })
     return output
@@ -215,12 +220,14 @@ def main():
     finally:
         report["apps"] = summary(apps, report["runs"])
         workspaces = [run["workspace"] for run in report["runs"] if run["workspace"]]
-        report["unique_workspaces"] = len(workspaces) == len(set(workspaces))
+        report["unique_workspaces"] = len(workspaces) == len(set(workspaces)) == len(report["runs"])
         time.sleep(2)
         report["remaining_processes"] = remaining_processes(workspaces)
         report["status"] = "passed" if (report["complete"] and report["unique_workspaces"]
             and not report["remaining_processes"] and all(run["status"] == "passed" for run in report["runs"])
-            and all(app["geometry_consistent"] for app in report["apps"])) else "failed"
+            and all(app["geometry_consistent"] for app in report["apps"])
+            and (args.concurrency < 2 or args.concurrent_runs < 2
+                 or all(app["concurrent_overlap"] for app in report["apps"]))) else "failed"
         write_report(report_path, report)
     if report["status"] != "passed":
         raise SystemExit(f"Compatibility matrix failed; see {report_path}")

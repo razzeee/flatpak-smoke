@@ -109,6 +109,8 @@ export default class Capture extends Extension {
         await delay(100);
         if (global.display.focus_window !== window)
             throw new Error('Could not focus selected window');
+        if (Main.modalCount > 0)
+            throw new Error('A desktop modal dialog blocks the selected window');
         if (request.action === 'focus')
             return this._info(window);
         if (request.action === 'resize') {
