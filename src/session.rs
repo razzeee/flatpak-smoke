@@ -440,7 +440,7 @@ impl<'a> SessionRunner<'a> {
             while started.elapsed() < timeout {
                 screenshotter
                     .health
-                    .check()
+                    .check(screenshotter.deadline.get())
                     .map_err(SessionError::internal)?;
                 screenshotter.capture_once_with_client(client, &candidate_path)?;
                 let visible = screenshotter.screenshots_differ(baseline_path, &candidate_path)?
@@ -618,7 +618,7 @@ impl SessionProcesses {
 
     fn health_check(&self) -> HealthCheck {
         let processes = self.clone();
-        HealthCheck::new(move || {
+        HealthCheck::new(move |_| {
             processes
                 .check()
                 .map_err(|error| std::io::Error::other(error.message))
@@ -705,7 +705,9 @@ impl Screenshotter {
         let mut last_error = None;
 
         while started.elapsed() < timeout {
-            self.health.check().map_err(SessionError::internal)?;
+            self.health
+                .check(self.deadline.get())
+                .map_err(SessionError::internal)?;
             match self.capture_once_with_client(client, path) {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = Some(error.message),
@@ -1410,7 +1412,7 @@ struct VncClient {
 
 impl VncClient {
     fn connect(port: u16, deadline: Instant, health: HealthCheck) -> Result<Self, SessionError> {
-        health.check().map_err(SessionError::internal)?;
+        health.check(deadline).map_err(SessionError::internal)?;
         let address: SocketAddr = ([127, 0, 0, 1], port).into();
         let stream = TcpStream::connect_timeout(
             &address,

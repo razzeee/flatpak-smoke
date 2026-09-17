@@ -38,6 +38,9 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets
 
+      - name: Check compatibility report validation
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/compatibility -p test_matrix.py
+
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -171,6 +174,49 @@ jobs:
             target/native-capture/**
             target/screenshot-workflow-*/**
             target/screenshot-failures/**
+
+  screenshot-compatibility:
+    name: Real-app screenshot compatibility
+    runs-on: ubuntu-latest
+    needs: cargo-checks
+    timeout-minutes: 45
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build capture environment and resolve real apps
+        run: |
+          docker build -t flatpak-smoke-screenshots -f Containerfile.screenshots .
+          docker build -t screenshot-compatibility -f Containerfile.compatibility .
+
+      - name: Run serial and concurrent recipes
+        run: |
+          image_id=$(docker image inspect screenshot-compatibility --format '{{.Id}}')
+          mkdir -p target
+          docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
+            -v "$PWD:/workspace" -w /workspace "$image_id" sh -c '
+              install -d -o 65534 -g 65534 target/compatibility
+              exec setpriv --reuid=65534 --regid=65534 --clear-groups \
+                python3 tests/compatibility/matrix.py \
+                --output target/compatibility/run --image-id "$1"
+            ' compatibility "$image_id"
+
+      - name: Check detached-app cancellation cleanup
+        run: |
+          docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
+            -v "$PWD:/workspace" -w /workspace screenshot-compatibility \
+            setpriv --reuid=65534 --regid=65534 --clear-groups \
+            python3 tests/screenshot_failures.py --binary /usr/local/bin/flatpak-smoke \
+            --bundle /opt/compatibility/artifacts/com.vscodium.codium.flatpak \
+            --output target/compatibility/cancellation --case cancel-instances --expect-detached
+
+      - name: Upload compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: screenshot-compatibility
+          if-no-files-found: warn
+          path: target/compatibility/**
 
   flathub-end-to-end:
     name: Flathub end-to-end smoke tests

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "apps": [
+    {
+      "name": "gnome-calculator",
+      "app_id": "org.gnome.Calculator",
+      "toolkit": "GTK/libadwaita",
+      "recipe": "gnome-calculator.yml",
+      "captures": ["overview", "calculation"]
+    },
+    {
+      "name": "kcalc",
+      "app_id": "org.kde.kcalc",
+      "toolkit": "Qt/KDE",
+      "recipe": "kcalc.yml",
+      "captures": ["overview", "calculation"]
+    },
+    {
+      "name": "vscodium",
+      "app_id": "com.vscodium.codium",
+      "toolkit": "Electron",
+      "recipe": "vscodium.yml",
+      "captures": ["overview", "settings"]
+    }
+  ]
+}

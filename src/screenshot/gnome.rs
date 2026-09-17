@@ -93,7 +93,7 @@ impl Gnome {
         };
         let mut last_error = String::new();
         loop {
-            desktop.check()?;
+            desktop.check(deadline)?;
             if let Ok(bus) = fs::read_to_string(&bus_path) {
                 desktop.bus = bus;
             }
@@ -109,7 +109,7 @@ impl Gnome {
                             .context("desktop did not report version")?
                             .to_string();
                         desktop.helper_ready = Some(desktop.workspace.home.join("helper-ready"));
-                        desktop.check()?;
+                        desktop.check(deadline)?;
                         return Ok(desktop);
                     }
                     Err(error) => last_error = error.to_string(),
@@ -118,7 +118,7 @@ impl Gnome {
             if sleep_before_checked(Duration::from_millis(100), deadline, &desktop.health())
                 .is_err()
             {
-                desktop.check()?;
+                desktop.check(deadline)?;
                 return Err(failure(
                     FailureReason::DisplayStartFailed,
                     format!("GNOME helper did not become ready: {last_error}"),
@@ -134,29 +134,36 @@ impl Gnome {
         deadline: Instant,
     ) -> anyhow::Result<()> {
         self.app_id = app_ref.id().to_string();
+        let password = self.workspace.home.join("keyring-password");
+        fs::write(&password, b"flatpak-smoke-capture")?;
         let keyring = self
             .workspace
             .command("gnome-keyring-daemon")
             .env("DBUS_SESSION_BUS_ADDRESS", &self.bus)
             .args([
                 "--foreground",
+                "--unlock",
                 "--components=secrets",
                 "--control-directory",
             ])
             .arg(self.workspace.home.join("runtime/keyring"))
+            .stdin(File::open(&password)?)
             .stdout(File::create(layout.logs_dir.join("keyring.stdout.log"))?)
             .stderr(File::create(layout.logs_dir.join("keyring.stderr.log"))?)
             .spawn_managed()?;
         self.keyring = Some(keyring);
-        let unlocked = self.workspace.command("sh")
-            .env("DBUS_SESSION_BUS_ADDRESS", &self.bus)
-            .args(["-c", "printf '\\n' | gnome-keyring-daemon --unlock --components=secrets --control-directory \"$XDG_RUNTIME_DIR/keyring\""])
-            .output_before_checked(deadline, &self.health())?;
-        ensure!(
-            unlocked.status.success(),
-            "unlocking session keyring: {}",
-            String::from_utf8_lossy(&unlocked.stderr)
-        );
+        // One foreground daemon unlocks this disposable profile. Starting a
+        // second --unlock process can race initialization and corrupt login.keyring.
+        loop {
+            if let Some(status) = self.keyring.as_mut().unwrap().try_wait()? {
+                anyhow::bail!("session keyring exited with {status}");
+            }
+            if self.call(json!({"action": "keyring_ready"}), deadline)? == true {
+                break;
+            }
+            sleep_before_checked(Duration::from_millis(50), deadline, &self.health())
+                .context("waiting for an unlocked session keyring")?;
+        }
         let app = self
             .workspace
             .command("flatpak")
@@ -184,7 +191,7 @@ impl Gnome {
     }
 
     fn call(&self, request: Value, deadline: Instant) -> anyhow::Result<Value> {
-        self.check()?;
+        self.check(deadline)?;
         let millis = remaining(deadline)?.as_millis().clamp(1, i32::MAX as u128);
         let output = self
             .workspace
@@ -194,7 +201,7 @@ impl Gnome {
             .arg(serde_json::to_string(&request)?)
             .arg(millis.to_string())
             .output_before_checked(deadline, &self.health());
-        self.check()?;
+        self.check(deadline)?;
         let output = output?;
         ensure!(
             output.status.success(),
@@ -222,6 +229,9 @@ fn check_processes(
     shell: &RefCell<ManagedChild>,
     app: Option<&RefCell<ManagedChild>>,
     helper_ready: Option<&Path>,
+    workspace: &Workspace,
+    app_id: &str,
+    deadline: Instant,
 ) -> anyhow::Result<()> {
     if let Some(status) = shell.borrow_mut().try_wait()? {
         return Err(failure(
@@ -232,10 +242,32 @@ fn check_processes(
     if let Some(app) = app
         && let Some(status) = app.borrow_mut().try_wait()?
     {
-        return Err(failure(
-            FailureReason::EarlyExit,
-            format!("app exited during capture with {status}"),
-        ));
+        // Some launchers (including VSCodium) exit after starting another
+        // Flatpak instance. ps is scoped to this workspace's XDG_RUNTIME_DIR.
+        let running = if status.success() {
+            let instances = workspace
+                .command("flatpak")
+                .args(["ps", "--columns=application"])
+                .output_before_checked(
+                    deadline.min(Instant::now() + Duration::from_secs(1)),
+                    &HealthCheck::default(),
+                )?;
+            ensure!(
+                instances.status.success(),
+                "checking screenshot app instances"
+            );
+            String::from_utf8_lossy(&instances.stdout)
+                .lines()
+                .any(|id| id.trim() == app_id)
+        } else {
+            false
+        };
+        if !running {
+            return Err(failure(
+                FailureReason::EarlyExit,
+                format!("app exited during capture with {status}"),
+            ));
+        }
     }
     if let Some(path) = helper_ready
         && !path.is_file()
@@ -245,6 +277,7 @@ fn check_processes(
             "native capture helper disconnected",
         ));
     }
+    remaining(deadline)?;
     Ok(())
 }
 
@@ -252,20 +285,32 @@ impl Desktop for Gnome {
     fn version(&self) -> &str {
         &self.version
     }
-    fn check(&self) -> anyhow::Result<()> {
+    fn check(&self, deadline: Instant) -> anyhow::Result<()> {
         check_processes(
             &self.shell,
             self.app.as_deref(),
             self.helper_ready.as_deref(),
+            &self.workspace,
+            &self.app_id,
+            deadline,
         )
     }
     fn health(&self) -> HealthCheck {
         let shell = self.shell.clone();
         let app = self.app.clone();
         let helper_ready = self.helper_ready.clone();
-        HealthCheck::new(move || {
-            check_processes(&shell, app.as_deref(), helper_ready.as_deref())
-                .map_err(std::io::Error::other)
+        let workspace = self.workspace.clone();
+        let app_id = self.app_id.clone();
+        HealthCheck::new(move |deadline| {
+            check_processes(
+                &shell,
+                app.as_deref(),
+                helper_ready.as_deref(),
+                &workspace,
+                &app_id,
+                deadline,
+            )
+            .map_err(std::io::Error::other)
         })
     }
     fn windows(&self, deadline: Instant) -> anyhow::Result<Vec<Window>> {
@@ -315,6 +360,23 @@ impl Desktop for Gnome {
 impl Drop for Gnome {
     fn drop(&mut self) {
         if let Some(app) = &self.app {
+            // Also stop detached/re-executed instances that left the launcher's
+            // process group. The private runtime directory excludes other runs.
+            if let Ok(mut cleanup) = self
+                .workspace
+                .command("flatpak")
+                .args(["kill", &self.app_id])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn_managed()
+            {
+                // Cleanup must run even when remaining() reports cancellation.
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline && matches!(cleanup.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
             app.borrow_mut().terminate();
         }
         if let Some(keyring) = &mut self.keyring {

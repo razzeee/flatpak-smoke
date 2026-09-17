@@ -31,7 +31,7 @@ pub enum Input<'a> {
 pub trait Desktop {
     fn version(&self) -> &str;
     fn health(&self) -> HealthCheck;
-    fn check(&self) -> anyhow::Result<()>;
+    fn check(&self, deadline: Instant) -> anyhow::Result<()>;
     fn windows(&self, deadline: Instant) -> anyhow::Result<Vec<Window>>;
     fn resize(
         &self,

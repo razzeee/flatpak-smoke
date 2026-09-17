@@ -1,0 +1,13 @@
+version: 1
+steps:
+  - wait_text: README.md
+    timeout: 30s
+  - capture:
+      name: overview
+      caption: Read the Flatpak package's getting-started notes
+  - key: Ctrl+comma
+  - wait_text: Commonly Used
+    timeout: 15s
+  - capture:
+      name: settings
+      caption: Configure the editor

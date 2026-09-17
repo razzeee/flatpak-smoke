@@ -369,6 +369,10 @@ extend the PNG beyond the frame dimensions. Version one supports English and
 scale factor one. The desktop is selected explicitly, not inferred from the
 Flatpak runtime; a future KDE backend can use the same recipe actions.
 
+See the [real-app compatibility matrix](docs/screenshot-compatibility.md) for
+tested GTK, Qt, and Electron builds, repeat/concurrency checks, and instructions
+for running apps as a non-root user in the screenshot container.
+
 Screenshot commands default to a five-minute overall timeout, 30 seconds for
 desktop startup, 30 seconds for initial window readiness, and ten seconds per
 recipe step. Override these with `--overall-timeout`, `--display-timeout`,
