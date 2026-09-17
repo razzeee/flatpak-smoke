@@ -14,17 +14,17 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CLEANUP_GRACE: Duration = Duration::from_millis(200);
 
-/// Optional run-local check, shared by subprocess polling, sockets, and delays.
+/// Run-local check sharing the caller's absolute deadline, including any I/O.
 #[derive(Clone, Default)]
-pub struct HealthCheck(Option<Rc<dyn Fn() -> io::Result<()>>>);
+pub struct HealthCheck(Option<Rc<dyn Fn(Instant) -> io::Result<()>>>);
 
 impl HealthCheck {
-    pub fn new(check: impl Fn() -> io::Result<()> + 'static) -> Self {
+    pub fn new(check: impl Fn(Instant) -> io::Result<()> + 'static) -> Self {
         Self(Some(Rc::new(check)))
     }
 
-    pub fn check(&self) -> io::Result<()> {
-        self.0.as_ref().map_or(Ok(()), |check| check())
+    pub fn check(&self, deadline: Instant) -> io::Result<()> {
+        self.0.as_ref().map_or(Ok(()), |check| check(deadline))
     }
 }
 
@@ -69,7 +69,7 @@ pub fn sleep_before_checked(
 ) -> io::Result<()> {
     let until = Instant::now() + duration;
     while Instant::now() < until {
-        health.check()?;
+        health.check(deadline)?;
         let budget = remaining(deadline)?;
         thread::sleep(
             budget
@@ -77,7 +77,7 @@ pub fn sleep_before_checked(
                 .min(until.saturating_duration_since(Instant::now())),
         );
     }
-    health.check()?;
+    health.check(deadline)?;
     remaining(deadline).map(|_| ())
 }
 
@@ -160,7 +160,7 @@ impl BoundedCommand for Command {
         deadline: Instant,
         health: &HealthCheck,
     ) -> io::Result<Output> {
-        health.check()?;
+        health.check(deadline)?;
         remaining(deadline)?;
         let mut stdout = tempfile::tempfile()?;
         let mut stderr = tempfile::tempfile()?;
@@ -170,7 +170,7 @@ impl BoundedCommand for Command {
             .stderr(stderr.try_clone()?)
             .spawn_managed()?;
         let status = loop {
-            health.check()?;
+            health.check(deadline)?;
             remaining(deadline)?;
             if let Some(status) = child.try_wait()? {
                 break status;
@@ -187,7 +187,8 @@ impl BoundedCommand for Command {
         };
         stdout.read_to_end(&mut output.stdout)?;
         stderr.read_to_end(&mut output.stderr)?;
-        health.check()?;
+        health.check(deadline)?;
+        remaining(deadline)?;
         Ok(output)
     }
 }
@@ -212,7 +213,7 @@ impl DeadlineStream {
 impl Read for DeadlineStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            self.health.check()?;
+            self.health.check(self.deadline)?;
             self.stream
                 .set_read_timeout(Some(remaining(self.deadline)?.min(POLL_INTERVAL)))?;
             match self.stream.read(buf) {
@@ -233,7 +234,7 @@ impl Read for DeadlineStream {
 impl Write for DeadlineStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         loop {
-            self.health.check()?;
+            self.health.check(self.deadline)?;
             self.stream
                 .set_write_timeout(Some(remaining(self.deadline)?.min(POLL_INTERVAL)))?;
             match self.stream.write(buf) {
@@ -251,7 +252,7 @@ impl Write for DeadlineStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.health.check()?;
+        self.health.check(self.deadline)?;
         remaining(self.deadline)?;
         self.stream.flush()
     }

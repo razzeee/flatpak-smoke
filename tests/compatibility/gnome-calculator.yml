@@ -1,4 +1,7 @@
 version: 1
+window:
+  width: 400
+  height: 650
 steps:
   - capture:
       name: overview

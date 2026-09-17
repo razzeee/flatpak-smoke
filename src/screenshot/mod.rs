@@ -113,7 +113,14 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
             workspace.clone(),
             &layout,
             workflow::bounded(deadline, common.display_timeout),
-        )?;
+        )
+        .map_err(|error| {
+            if error.downcast_ref::<CaptureFailure>().is_some() {
+                error
+            } else {
+                failure(FailureReason::DisplayStartFailed, format!("{error:#}"))
+            }
+        })?;
         manifest.desktop_version = Some(desktop.version().to_string());
         let launch_started = Instant::now();
         desktop.launch(
@@ -137,7 +144,9 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
             timings.launch_to_window = Some(launch_started.elapsed().as_millis());
             workflow.execute(&recipe, selected, common.screenshot_timeout, &mut manifest)
         })();
-        desktop.check().and(result)
+        // Preserve the workflow's classified failure, especially cancellation.
+        // Only a successful workflow needs a final liveness check.
+        result.and_then(|()| desktop.check(deadline))
     })();
     timings.total = started.elapsed().as_millis();
     let mut screenshots: Vec<_> = manifest
@@ -176,9 +185,9 @@ pub fn doctor() -> anyhow::Result<()> {
     let version = check_dependencies(Instant::now() + Duration::from_secs(5))?;
     let workspace = Rc::new(workspace::Workspace::prepare()?);
     let layout = OutputLayout::prepare(&workspace.home.join("doctor-output"), false)?;
-    let desktop =
-        gnome::Gnome::start(workspace, &layout, Instant::now() + Duration::from_secs(30))?;
-    desktop.check()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let desktop = gnome::Gnome::start(workspace, &layout, deadline)?;
+    desktop.check(deadline)?;
     println!("flatpak-smoke doctor: screenshot tools and native helper ok ({version})");
     Ok(())
 }

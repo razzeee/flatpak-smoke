@@ -34,8 +34,7 @@ pub struct Workflow<'a> {
 impl Workflow<'_> {
     pub fn initialize(&self, recipe: &Recipe, deadline: Instant) -> anyhow::Result<u64> {
         let result = self.initialize_window(recipe, deadline);
-        self.desktop.check()?;
-        result.map_err(|error| {
+        self.desktop.check(deadline).and(result).map_err(|error| {
             if Instant::now() >= deadline {
                 failure(
                     FailureReason::WindowTimeout,
@@ -105,8 +104,7 @@ impl Workflow<'_> {
             let result = self
                 .step(step, &mut selected, deadline, manifest)
                 .with_context(|| format!("recipe step {index}"));
-            self.desktop.check()?;
-            result.map_err(|error| {
+            self.desktop.check(deadline).and(result).map_err(|error| {
                 if error.downcast_ref::<super::CaptureFailure>().is_some() {
                     error
                 } else {
@@ -124,7 +122,7 @@ impl Workflow<'_> {
                     format!("final helper check: {error:#}"),
                 )
             })?;
-        self.desktop.check()
+        self.desktop.check(self.overall)
     }
 
     fn step(
@@ -226,7 +224,7 @@ impl Workflow<'_> {
     }
 
     fn snapshot(&self, id: u64, deadline: Instant) -> anyhow::Result<(Window, ImageInfo)> {
-        self.desktop.check()?;
+        self.desktop.check(deadline)?;
         let pending = self.layout.logs_dir.join("pending.png");
         let window = self.desktop.capture(id, &pending, deadline)?;
         let image = self.images.inspect(&pending, &window, deadline)?;
