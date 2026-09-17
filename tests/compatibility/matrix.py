@@ -74,7 +74,10 @@ def invoke(command, log):
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                raise TimeoutError("runner did not exit after SIGKILL") from None
         raise TimeoutError("runner exceeded its external timeout")
 
 
@@ -85,6 +88,12 @@ def workspace_from(output):
             if line.startswith("capture workspace: "):
                 return line.split(": ", 1)[1]
     return None
+
+
+def workspace_status(runs):
+    workspaces = [run["workspace"] for run in runs if run.get("workspace")]
+    provenance = all(run.get("workspace") for run in runs)
+    return provenance, len(workspaces) == len(set(workspaces)), workspaces
 
 
 def run_once(app, phase, index, args, barrier=None):
@@ -219,11 +228,13 @@ def main():
         report["complete"] = True
     finally:
         report["apps"] = summary(apps, report["runs"])
-        workspaces = [run["workspace"] for run in report["runs"] if run["workspace"]]
-        report["unique_workspaces"] = len(workspaces) == len(set(workspaces)) == len(report["runs"])
+        provenance, unique, workspaces = workspace_status(report["runs"])
+        report["workspace_provenance"] = provenance
+        report["unique_workspaces"] = unique
         time.sleep(2)
         report["remaining_processes"] = remaining_processes(workspaces)
-        report["status"] = "passed" if (report["complete"] and report["unique_workspaces"]
+        report["status"] = "passed" if (report["complete"] and report["workspace_provenance"]
+            and report["unique_workspaces"]
             and not report["remaining_processes"] and all(run["status"] == "passed" for run in report["runs"])
             and all(app["geometry_consistent"] for app in report["apps"])
             and (args.concurrency < 2 or args.concurrent_runs < 2
