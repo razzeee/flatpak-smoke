@@ -1,0 +1,15 @@
+version: 1
+window:
+  width: 400
+  height: 650
+steps:
+  - capture:
+      name: overview
+      caption: Perform everyday calculations
+  - key: "2"
+  - key: plus
+  - key: "2"
+  - key: Return
+  - capture:
+      name: calculation
+      caption: Review the result of a calculation

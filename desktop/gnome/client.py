@@ -82,6 +82,33 @@ def enter_text(pid, text):
 def main():
     request = json.loads(sys.argv[1])
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    if request["action"] == "keyring_ready":
+        # Check ownership first so this probe cannot auto-start a competing daemon.
+        owner = connection.call_sync(
+            "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+            "NameHasOwner", GLib.Variant("(s)", ("org.freedesktop.secrets",)),
+            GLib.VariantType.new("(b)"), Gio.DBusCallFlags.NONE, int(sys.argv[2]), None,
+        ).unpack()[0]
+        ready = False
+        if owner:
+            try:
+                locked = connection.call_sync(
+                    "org.freedesktop.secrets", "/org/freedesktop/secrets/collection/login",
+                    "org.freedesktop.DBus.Properties", "Get",
+                    GLib.Variant("(ss)", ("org.freedesktop.Secret.Collection", "Locked")),
+                    GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NO_AUTO_START,
+                    int(sys.argv[2]), None,
+                ).unpack()[0]
+                ready = locked is False
+            except GLib.Error as error:
+                # The daemon can own its bus name before exporting the collection.
+                if Gio.DBusError.get_remote_error(error) not in (
+                    "org.freedesktop.DBus.Error.UnknownObject",
+                    "org.freedesktop.DBus.Error.UnknownMethod",
+                ):
+                    raise
+        print(json.dumps({"ok": True, "result": ready}))
+        return
     native = {**request, "action": "focus"} if request["action"] == "type_text" else request
     reply = connection.call_sync(
         "org.flatpak.Smoke.Desktop1", "/org/flatpak/Smoke/Desktop1",
