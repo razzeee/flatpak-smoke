@@ -69,13 +69,14 @@ impl<'a> SessionRunner<'a> {
             ))
             .map_err(SessionError::internal)?;
 
-        let weston = Rc::new(RefCell::new(self.start_weston(&display, vnc_port)?));
+        let (weston, session_client) = self.start_weston(&display, vnc_port)?;
+        let weston = Rc::new(RefCell::new(weston));
         let session_result = self.run_app_session(
             app_ref,
             screenshot_name,
             screenshots_after_click,
             &display,
-            vnc_port,
+            session_client,
             weston.clone(),
         );
         let compositor = SessionProcesses {
@@ -107,14 +108,13 @@ impl<'a> SessionRunner<'a> {
         screenshot_name: &str,
         screenshots_after_click: &[String],
         display: &str,
-        vnc_port: u16,
+        mut session_client: VncClient,
         weston: Rc<RefCell<Child>>,
     ) -> Result<SessionSuccess, SessionError> {
         let launch_started = Instant::now();
         let mut processes = SessionProcesses { weston, app: None };
         let mut screenshotter = Screenshotter::new(
             display,
-            vnc_port,
             self.env.clone(),
             self.layout.runner_log.clone(),
             self.overall_deadline,
@@ -124,11 +124,8 @@ impl<'a> SessionRunner<'a> {
             self.overall_deadline
                 .min(Instant::now() + self.screenshot_timeout),
         );
-        let mut session_client = VncClient::connect(
-            vnc_port,
-            screenshotter.deadline.get(),
-            screenshotter.health.clone(),
-        )?;
+        // Keep the connection that proved readiness. Disconnecting that client
+        // and immediately reconnecting can race Weston's VNC client teardown.
         let baseline_path = self.layout.logs_dir.join("wayland-baseline.png");
         screenshotter.capture_once_with_client(&mut session_client, &baseline_path)?;
 
@@ -313,13 +310,17 @@ impl<'a> SessionRunner<'a> {
         .with_screenshots(screenshots.clone()))
     }
 
-    fn start_weston(&self, display: &str, vnc_port: u16) -> Result<Child, SessionError> {
+    fn start_weston(
+        &self,
+        display: &str,
+        vnc_port: u16,
+    ) -> Result<(Child, VncClient), SessionError> {
         let mut last_error = None;
         for backend in ["vnc", "vnc-backend.so"] {
             remaining(self.overall_deadline).map_err(SessionError::internal)?;
             let mut weston = self.spawn_weston(display, backend, vnc_port)?;
             match self.wait_for_compositor(display, vnc_port, &mut weston) {
-                Ok(()) => return Ok(weston),
+                Ok(client) => return Ok((weston, client)),
                 Err(error) => {
                     terminate_child(&mut weston);
                     last_error = Some(error);
@@ -370,13 +371,12 @@ impl<'a> SessionRunner<'a> {
         display: &str,
         vnc_port: u16,
         weston: &mut Child,
-    ) -> Result<(), SessionError> {
+    ) -> Result<VncClient, SessionError> {
         let timeout = self.bounded_timeout(self.display_timeout)?;
         let started = Instant::now();
         let mut last_error = None;
         let screenshotter = Screenshotter::new(
             display,
-            vnc_port,
             self.env.clone(),
             self.layout.runner_log.clone(),
             self.overall_deadline.min(started + timeout),
@@ -390,14 +390,14 @@ impl<'a> SessionRunner<'a> {
                 ));
             }
 
-            match screenshotter.capture_once(&readiness_path) {
-                Ok(()) => {
+            match screenshotter.connect_and_capture(vnc_port, &readiness_path) {
+                Ok(client) => {
                     return match weston.try_wait().map_err(SessionError::internal)? {
                         Some(status) => Err(SessionError::new(
                             FailureReason::DisplayStartFailed,
                             format!("Weston exited after display readiness check with {status}"),
                         )),
-                        None => Ok(()),
+                        None => Ok(client),
                     };
                 }
                 Err(error) => last_error = Some(error.message),
@@ -669,7 +669,6 @@ struct Screenshotter {
     deadline: Cell<Instant>,
     overall_deadline: Instant,
     display: String,
-    vnc_port: u16,
     env: Vec<(OsString, OsString)>,
     runner_log: PathBuf,
 }
@@ -677,7 +676,6 @@ struct Screenshotter {
 impl Screenshotter {
     fn new(
         display: &str,
-        vnc_port: u16,
         env: Vec<(OsString, OsString)>,
         runner_log: PathBuf,
         deadline: Instant,
@@ -687,7 +685,6 @@ impl Screenshotter {
             deadline: Cell::new(deadline),
             overall_deadline: deadline,
             display: display.to_string(),
-            vnc_port,
             env,
             runner_log,
         }
@@ -735,12 +732,10 @@ impl Screenshotter {
         ))
     }
 
-    fn capture_once(&self, path: &Path) -> Result<(), SessionError> {
-        let mut client =
-            VncClient::connect(self.vnc_port, self.deadline.get(), self.health.clone())?;
-        client.capture_png(path)?;
-        self.append_log(format!("screenshot captured at '{}'", path.display()))?;
-        Ok(())
+    fn connect_and_capture(&self, vnc_port: u16, path: &Path) -> Result<VncClient, SessionError> {
+        let mut client = VncClient::connect(vnc_port, self.deadline.get(), self.health.clone())?;
+        self.capture_once_with_client(&mut client, path)?;
+        Ok(client)
     }
 
     fn click_with_client(
@@ -2179,7 +2174,6 @@ mod tests {
             let started = Instant::now();
             let mut screenshotter = Screenshotter::new(
                 "unused",
-                0,
                 vec![
                     (OsString::from("PATH"), temp.path().as_os_str().to_owned()),
                     (
@@ -2276,7 +2270,6 @@ mod tests {
         let started = Instant::now();
         let screenshotter = Screenshotter::new(
             "unused",
-            0,
             vec![(OsString::from("PATH"), temp.path().as_os_str().to_owned())],
             temp.path().join("runner.log"),
             started + Duration::from_millis(150),

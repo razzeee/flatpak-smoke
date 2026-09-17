@@ -11,6 +11,37 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def process_group_running(group):
+    for path in Path("/proc").iterdir():
+        if not path.name.isdecimal():
+            continue
+        try:
+            fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if int(fields[2]) == group and fields[0] not in ("Z", "X"):
+            return True
+    return False
+
+
+def stop_process_group(child):
+    # The leader can exit before its descendants finish writing session state.
+    # Reap it, but wait for the whole group before removing the temporary home.
+    for sig, grace in ((signal.SIGTERM, .2), (signal.SIGKILL, 3)):
+        try:
+            os.killpg(child.pid, sig)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            child.poll()
+            if not process_group_running(child.pid):
+                child.wait(timeout=3)
+                return
+            time.sleep(.01)
+    raise RuntimeError(f"process group {child.pid} survived cleanup")
+
+
 def run():
     output = ROOT / "target/native-capture"
     output.mkdir(parents=True, exist_ok=True)
@@ -95,18 +126,11 @@ def run():
                 dialog = until(lambda: next((w for w in call({"action": "windows"})
                                              if w["pid"] == child.pid and w["title"] == "Preferences"), None))
                 call({"action": "capture", "window": dialog["id"], "path": str(output / f"{toolkit}-preferences.png")})
-                os.killpg(child.pid, signal.SIGTERM)
-                child.wait(timeout=3)
+                stop_process_group(child)
         finally:
-            subprocess.run(["fusermount3", "-uz", str(home / "runtime/doc")], capture_output=True)
             for child in reversed(children):
-                if child.poll() is None:
-                    os.killpg(child.pid, signal.SIGTERM)
-                    try:
-                        child.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(child.pid, signal.SIGKILL)
-                        child.wait()
+                stop_process_group(child)
+            subprocess.run(["fusermount3", "-uz", str(home / "runtime/doc")], capture_output=True, timeout=3)
             log.close()
 
 
