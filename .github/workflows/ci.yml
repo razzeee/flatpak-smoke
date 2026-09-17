@@ -41,6 +41,9 @@ jobs:
       - name: Check compatibility report validation
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/compatibility -p test_matrix.py
 
+      - name: Check native test process cleanup
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_native_cleanup.py
+
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
