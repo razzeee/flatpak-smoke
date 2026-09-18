@@ -1,43 +1,54 @@
 # flatpak-smoke
 
-Check that your Flatpak installs and shows a window, or generate
-native-window screenshots for your app listing. Both workflows run headlessly
-in CI.
+Check that your Flatpak installs and shows a window, or capture native-window
+screenshots for your app listing. Both workflows run headlessly in CI.
 
 ## Before you start
 
-Use a **Linux runner with Docker and support for privileged containers**.
-Run the examples from your app's checkout, after building a
-`.flatpak` bundle. Replace `build/org.example.App.flatpak` with your bundle path.
+Build a `.flatpak` bundle in your app's repository. The examples below run after
+that build on a **Linux amd64 runner with Docker and privileged-container support**.
+Replace `build/org.example.App.flatpak` with your bundle path.
 
-The commands below build the tool's container images with their dependencies.
-For CI, pin the Git build URL to a commit using `.git#<full-commit-sha>`.
-The images run as root by default. For apps that reject root, such as VSCodium,
-use the [non-root container examples](docs/reference.md#non-root-containers).
+The examples target the first release, **v0.1.0**. Its action tag and GHCR images
+must be published before these versioned examples can run. Until then, use the
+[source-build instructions](docs/reference.md#building-from-source) and the
+action's `image` override. Publication happens through CI; see the
+[release checklist](docs/releases.md).
 
-## Smoke-test your app
+## Smoke-test your app in GitHub Actions
 
-```sh
-docker build -t flatpak-smoke -f Containerfile \
-  https://github.com/razzeee/flatpak-smoke.git
+Add these steps after checkout and your Flatpak build in an `ubuntu-latest` job:
 
-docker run --rm --privileged \
-  -v "$PWD:/workspace" -w /workspace \
-  flatpak-smoke verify-bundle build/org.example.App.flatpak \
-  --output artifacts/smoke --allow-network-remotes --overall-timeout 5m
+```yaml
+- name: Check that the app starts
+  uses: razzeee/flatpak-smoke@v0.1.0
+  with:
+    bundle: build/org.example.App.flatpak
+    output: artifacts/smoke
+    allow-network-remotes: "true"
+    args: --overall-timeout 5m
+
+- name: Upload results, including failures
+  if: always()
+  uses: actions/upload-artifact@v7
+  with:
+    name: flatpak-smoke
+    path: artifacts/smoke
 ```
 
-The command fails if installation or startup fails, the app exits during the
-test, no visible content appears, or OCR detects a known fatal error message.
-Find the result in `artifacts/smoke/result.json`, with screenshots and logs
-alongside it.
+The action fails if installation or startup fails, the app exits during the test,
+no visible content appears, or OCR detects a known fatal error message. It saves
+`result.json`, screenshots, and logs in the output directory.
 
-To also click a button and check the resulting screen, append
-`--screenshot-after-click "Log In"`, replacing the label with one in your app.
+`allow-network-remotes` lets Flatpak download missing runtimes from Flathub. For
+apps that reject root, add `user: nobody`. To click a button and check the next
+screen, add `--screenshot-after-click "Log In"` to `args`.
 
 ## Capture app-listing screenshots
 
-Create `screenshots.yml` in your app's repository:
+### 1. Write a recipe
+
+Create `ci/screenshots.yml` in your app's repository:
 
 ```yaml
 version: 1
@@ -50,51 +61,112 @@ steps:
       caption: Explore the main window
 ```
 
-Choose a size your app supports and write a caption describing its content.
-Add [recipe actions](docs/reference.md#writing-a-recipe) to navigate, enter text,
-wait for content, and capture additional views.
+Choose a size your app supports and describe the content in the caption. Recipes
+can also click buttons, enter text, wait for content, and select another window.
+See the [recipe actions](docs/reference.md#writing-a-recipe).
 
-```sh
-docker build -t flatpak-smoke-screenshots -f Containerfile.screenshots \
-  https://github.com/razzeee/flatpak-smoke.git
+### 2. Add sample content if your app needs it
 
-docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
-  -v "$PWD:/workspace" -w /workspace \
-  flatpak-smoke-screenshots \
-  flatpak-smoke screenshot-bundle build/org.example.App.flatpak \
-  --recipe screenshots.yml --output artifacts/capture --allow-network-remotes
+Check in a small example document or project and, optionally, app settings:
+
+```text
+ci/
+  screenshots.yml
+  fixtures/
+    example-project/
+      document.txt
+    settings.ini
 ```
 
-Captures include native window decorations and transparency, without the
-desktop background or pointer. They use a fresh app profile, English, and
-1× scale.
-
-Your images are in `artifacts/capture/screenshots/`. The accompanying
-`screenshots.json` lists their order, captions, and dimensions. Review the images
-before publishing them; fresh profiles may need recipe steps to populate a view.
-
-## Add it to CI
-
-Run either set of commands after your Flatpak build. A nonzero exit status fails
-the job. Keep `--allow-network-remotes` when the container needs to download
-missing runtimes from Flathub.
-
-Upload the output even when a check fails. For GitHub Actions:
+Add `setup` and `launch` to the recipe:
 
 ```yaml
-- name: Upload Flatpak results
+version: 1
+setup:
+  files:
+    - source: fixtures/example-project
+      destination: data/example-project
+    - source: fixtures/settings.ini
+      destination: config/settings.ini
+launch:
+  args:
+    - --open
+    - "${APP_DATA}/example-project/document.txt"
+window:
+  width: 900
+  height: 650
+steps:
+  - wait_text: Example document
+  - capture:
+      name: overview
+      caption: Edit an example document
+```
+
+Use your app's actual file formats, configuration paths, command-line arguments,
+and visible text. `--open` is illustrative; apps that accept a positional filename
+need only the path argument. Remove the settings entry if you don't need it.
+
+Source paths are **relative to the recipe file**. The runner copies them into the
+app's fresh Flatpak data/config directories before launch. `${APP_DATA}` and
+`${APP_CONFIG}` resolve to those directories inside the sandbox. Every run starts
+from the checked-in files, even if the app edits them. See
+[seeding data and launch arguments](docs/reference.md#seeding-data-and-launch-arguments)
+for the copy rules.
+
+### 3. Run the recipe in CI
+
+```yaml
+- name: Capture listing screenshots
+  uses: razzeee/flatpak-smoke@v0.1.0
+  with:
+    mode: screenshots
+    bundle: build/org.example.App.flatpak
+    recipe: ci/screenshots.yml
+    output: artifacts/capture
+    allow-network-remotes: "true"
+    args: --overall-timeout 10m
+
+- name: Upload screenshots and diagnostics
   if: always()
   uses: actions/upload-artifact@v7
   with:
-    name: flatpak-results
-    path: artifacts/
+    name: listing-screenshots
+    path: artifacts/capture
 ```
 
-For repeated local runs, add `--force` to replace the previous output.
+Action paths are relative to your checkout. Find the images in
+`artifacts/capture/screenshots/`; `screenshots.json` lists their order, captions,
+and dimensions. Captures include native window decorations and transparency,
+without the desktop background or pointer. They use English and 1× scale.
+Review the images before publishing them.
+
+## Run locally with Docker
+
+Run these commands from your app's checkout, using the same bundle and recipe:
+
+```sh
+docker pull ghcr.io/razzeee/flatpak-smoke:v0.1.0
+docker run --rm --privileged \
+  -v "$PWD:/workspace" -w /workspace \
+  ghcr.io/razzeee/flatpak-smoke:v0.1.0 \
+  verify-bundle build/org.example.App.flatpak \
+  --output artifacts/smoke --allow-network-remotes --overall-timeout 5m
+
+docker pull ghcr.io/razzeee/flatpak-smoke-screenshots:v0.1.0
+docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
+  -v "$PWD:/workspace" -w /workspace \
+  ghcr.io/razzeee/flatpak-smoke-screenshots:v0.1.0 \
+  flatpak-smoke screenshot-bundle build/org.example.App.flatpak \
+  --recipe ci/screenshots.yml --output artifacts/capture --allow-network-remotes
+```
+
+For repeated runs, add `--force` to replace previous results. Docker images run as
+root by default; see the [non-root examples](docs/reference.md#non-root-containers)
+for apps that require another user.
 
 ## More options
 
-- [CLI reference](docs/reference.md): local OSTree repos, timeouts, result format,
-  host installation, and troubleshooting.
-- [Recipe actions and window selection](docs/reference.md#writing-a-recipe).
+- [Action inputs, outputs, and version pinning](docs/reference.md#github-action).
+- [CLI reference](docs/reference.md): local OSTree repos, timeouts, results, host
+  installation, and troubleshooting.
 - [Tested app compatibility](docs/screenshot-compatibility.md).

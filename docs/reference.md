@@ -229,11 +229,33 @@ cargo run -- doctor
 
 ## Container Usage
 
+Published images are `ghcr.io/razzeee/flatpak-smoke` for verification and
+`ghcr.io/razzeee/flatpak-smoke-screenshots` for native screenshots. They support
+Linux amd64 and contain the tool and desktop dependencies, but not app runtimes.
+Pass `--allow-network-remotes` when those need downloading from Flathub.
+Use a published release tag or `sha-<full-commit-sha>`; digest pinning is supported.
+See the README for first-release availability.
+
+### Building from source
+
 Build the reference image:
 
 ```sh
 podman build -t flatpak-smoke -f Containerfile .
 ```
+
+Or build both images from Git without checking out this repository:
+
+```sh
+docker build -t flatpak-smoke -f Containerfile \
+  https://github.com/razzeee/flatpak-smoke.git
+docker build -t flatpak-smoke-screenshots -f Containerfile.screenshots \
+  https://github.com/razzeee/flatpak-smoke.git
+```
+
+Pin the Git build URL with `.git#<full-commit-sha>` in CI. For unreleased work,
+build from a checkout containing that work, using `.` as the build context.
+The action accepts these local names through its `image` input.
 
 Run verification inside the container:
 
@@ -251,7 +273,7 @@ Flatpak often needs namespace support inside CI containers. `--privileged` is a 
 ### Non-root containers
 
 For apps that reject root, use the image's existing `nobody` account, UID/GID
-65534. These examples assume you built the images from the quick start and are
+65534. These examples assume you built the images from source and are
 running from your app's checkout. Use fresh output directories.
 
 For smoke testing, start the system bus before dropping privileges. Set `USER`
@@ -288,6 +310,78 @@ The output files belong to UID 65534. Simply passing your host UID with Docker's
 `--user` is insufficient if that UID has no account in the image. Screenshot
 mode also needs the system bus started before switching users.
 
+In the GitHub Action, set `user: nobody`. The action starts the bus, drops app
+privileges, and restores artifact ownership to the runner after either success or
+failure. It also handles replacement of previous non-root outputs with `--force`.
+
+## GitHub Action
+
+Run the composite action in a Linux amd64 job with Docker and privileged-container
+support. GitHub-hosted `ubuntu-latest` is the tested runner. Checkout your app and
+build its bundle or OSTree repository first. Python 3.9 or newer must be available
+on self-hosted runners. No Rust toolchain is required.
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `verify` | `verify` or `screenshots`. |
+| `bundle` | None | Workspace-relative `.flatpak` bundle. Mutually exclusive with `repo` and `app-ref`. |
+| `repo` | None | Workspace-relative OSTree repository, used instead of `bundle`. |
+| `app-ref` | None | Full `app/ID/ARCH/BRANCH` ref, required with `repo`. |
+| `recipe` | None | Workspace-relative recipe file, required for `screenshots`; invalid for `verify`. |
+| `output` | `artifacts/flatpak-smoke` | Output directory beneath the workspace. Existing artifacts require `args: --force`. |
+| `allow-network-remotes` | `false` | Set to `"true"` to download missing runtimes from Flathub. |
+| `args` | Empty | Extra CLI arguments, with quoted values and multiline input supported. |
+| `image` | Version recorded in `action/image-version` | Override the mode-specific image with a local name, release tag, SHA tag, or digest. |
+| `user` | `root` | `root` or `nobody`. Use `nobody` for apps that reject root. |
+
+Example using a local repository and longer timeouts:
+
+```yaml
+- uses: razzeee/flatpak-smoke@v0.1.0
+  id: capture
+  with:
+    mode: screenshots
+    repo: build/repo
+    app-ref: app/org.example.App/x86_64/master
+    recipe: ci/screenshots.yml
+    output: artifacts/capture
+    allow-network-remotes: "true"
+    user: nobody
+    args: |
+      --overall-timeout 10m
+      --window-timeout 60s
+```
+
+The action's `output` output is the workspace-relative artifact directory. The
+wrapper sets it before invoking Docker, including when the CLI later fails.
+Input-validation failures happen earlier and do not produce output artifacts.
+The CLI exit status fails the step. Upload results in a separate
+`actions/upload-artifact` step with `if: always()`, as shown in the README.
+
+`args` uses shell-style quoting only. No shell commands, environment variables,
+globs, or command substitutions are evaluated. For example,
+`--screenshot-after-click "Log In"` passes the label as one argument. Use the named
+inputs for `--output`, `--recipe`, and `--allow-network-remotes`; overriding those
+through `args` is rejected. App launch arguments belong in the recipe, not here.
+
+The workspace is mounted at `/workspace`. Keep the bundle, recipe, and fixture
+files within it; action input paths cannot escape it. The action manages Docker's
+privileged mode, tmpfs mounts, system bus, and artifact ownership.
+
+### Pinning versions
+
+Each action release records its matching image release in `action/image-version`.
+It does not follow `latest`. Main-branch builds publish `sha-<full-commit-sha>`
+images after CI passes; `v*` tags publish the matching version after the same
+checks. The first planned version is `v0.1.0`.
+
+For immutable CI inputs, pin `uses: razzeee/flatpak-smoke@<full-action-commit-sha>`
+and set `image: ghcr.io/razzeee/flatpak-smoke-screenshots@sha256:<digest>` for
+screenshots, or the corresponding smoke image for verification. Obtain the digest
+from the published package or `docker image inspect` after pulling. When testing
+unreleased action changes, set `image` to the matching main-build SHA tag or a
+locally built image. Forks publishing to another owner must override `image`.
+
 ## Troubleshooting
 
 ### The Output Directory Already Exists
@@ -301,6 +395,19 @@ Use `--allow-network-remotes` if the bundle needs runtimes or extensions that ar
 ### The App Needs More Time
 
 Increase `--overall-timeout` and `--window-timeout` for slow installs or first launches.
+
+### Seeded files are missing or the app cannot open a document
+
+Resolve `setup.files[].source` relative to the recipe directory, not the checkout.
+For example, `ci/screenshots.yml` with `source: fixtures/sample.txt` reads
+`ci/fixtures/sample.txt`. Ensure CI checks out those files and that directories
+contain regular files rather than symlinks.
+
+Use `${APP_DATA}` or `${APP_CONFIG}` in recipe launch arguments, rather than a
+host path such as `/workspace/ci/fixtures/sample.txt`. Copying files into the
+container does not itself grant the Flatpak sandbox access. Check that the app
+supports the supplied argument and file format. Inspect `result.json` and
+`logs/app.stderr.log` when launching fails.
 
 ## Readiness regression fixtures
 
@@ -453,12 +560,71 @@ button labels. These copies and their TSV output stay under `logs/`; they never
 replace listing PNGs. Failed runs also retain the last complete candidate image.
 Use `--force` to replace an existing capture output, including its screenshot manifest.
 
-### Content and future data bundles
+### Seeding data and launch arguments
 
 Every screenshot run starts with its own home, desktop configuration, Flatpak
 installation, and per-app data. It does not reuse the caller's application profile,
 theme, or language settings. This also makes repeated recipes start from the same
 fresh state.
+
+Use optional `setup.files` entries to copy checked-in files or directories into
+that profile, and `launch.args` to open a document or select an app mode:
+
+```yaml
+version: 1
+setup:
+  files:
+    - source: fixtures/project
+      destination: data/example-project
+    - source: fixtures/settings.ini
+      destination: config/my-app/settings.ini
+launch:
+  args:
+    - --open
+    - "${APP_DATA}/example-project/document.txt"
+steps:
+  - wait_text: Example document
+  - capture:
+      name: document
+      caption: Edit an example document
+```
+
+Adapt `--open`, the configuration layout, and the visible text to your app. Existing
+version 1 recipes without these fields still launch with an empty profile and no
+extra arguments.
+
+Copy rules:
+
+- Sources are nonempty relative paths beneath the recipe directory. Absolute
+  paths and `..` source components are rejected; keep fixtures alongside the
+  recipe or in a subdirectory.
+- Destinations must name a path beneath `data/` or `config/`. They map to the
+  installed app's private XDG data/config directories, not the desktop's settings.
+- A file copies to the exact destination name. A directory copies its contents
+  into the destination directory, including nested directories and hidden files.
+- Source symlinks, including symlinked parent paths, and special files are rejected.
+  Absolute destinations and `..` destination components are rejected too.
+- Directories may merge, but two files cannot occupy the same destination. Existing
+  destination files are never silently overwritten. Missing sources and conflicts
+  fail before app launch and appear in the run's result.
+- Copies create ordinary writable files under the current runner user; source
+  ownership and executable bits are not preserved. Sources remain unchanged.
+- Setup runs after installation and before desktop/app launch, within the overall
+  timeout. The temporary profile is removed during normal run cleanup.
+
+`launch.args` is an array of strings appended after the app ID in `flatpak run`.
+Each element stays one argument, including spaces or an empty string. Two
+placeholders are supported anywhere within an argument:
+
+| Placeholder | Expansion |
+| --- | --- |
+| `${APP_DATA}` | The app's sandbox-visible XDG data directory. |
+| `${APP_CONFIG}` | The app's sandbox-visible XDG configuration directory. |
+
+Unknown or unterminated `${...}` placeholders and NUL characters are errors.
+There is no shell evaluation or arbitrary environment expansion. These settings
+do not alter Flatpak permissions or choose a different executable. General app
+environment overrides and profile export/import commands are not provided.
 
 The private session enables accessibility for confirmed text entry. `doctor
 --desktop gnome` starts a temporary headless session and contacts the native
@@ -468,8 +634,3 @@ Authors still select useful content and review the images against the
 [Flathub quality guidelines](https://docs.flathub.org/docs/for-app-authors/metainfo-guidelines/quality-guidelines#screenshots).
 Default data can leave a content-oriented app in an empty state. Passing a recipe
 does not certify the editorial quality of its screenshots or publish them.
-
-The data-preparation step runs after installation and before desktop/app launch.
-A future importer can restore author-provided data there. Export from a normal
-user session, external-document mapping, and a portable bundle format are future
-work; version one has no data import/export command.

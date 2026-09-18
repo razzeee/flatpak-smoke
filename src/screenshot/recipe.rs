@@ -12,7 +12,30 @@ pub struct Recipe {
     pub language: String,
     #[serde(default)]
     pub window: Window,
+    #[serde(default)]
+    pub setup: Setup,
+    #[serde(default)]
+    pub launch: Launch,
     pub steps: Vec<Step>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Setup {
+    pub files: Vec<SeedFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeedFile {
+    pub source: std::path::PathBuf,
+    pub destination: std::path::PathBuf,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Launch {
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +206,35 @@ impl Recipe {
             "recipe must contain at least one capture"
         );
         Ok(recipe)
+    }
+
+    /// Validate profile setup after output preparation, but before installing an app.
+    pub fn validate_setup(&self) -> anyhow::Result<()> {
+        for entry in &self.setup.files {
+            use std::path::Component;
+            let parts: Vec<_> = entry.destination.components().collect();
+            ensure!(
+                parts.len() >= 2
+                    && matches!(parts[0], Component::Normal(root) if root == "data" || root == "config")
+                    && parts
+                        .iter()
+                        .all(|part| matches!(part, Component::Normal(_))),
+                "setup destination must be beneath data/ or config/ without parent traversal"
+            );
+            ensure!(
+                !entry.source.as_os_str().is_empty()
+                    && entry.source.is_relative()
+                    && !entry
+                        .source
+                        .components()
+                        .any(|part| matches!(part, Component::ParentDir)),
+                "setup source must be a nonempty path relative to the recipe without parent traversal"
+            );
+        }
+        for arg in &self.launch.args {
+            super::setup::expand(arg, Path::new("/profile"))?;
+        }
+        Ok(())
     }
 }
 

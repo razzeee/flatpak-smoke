@@ -4,6 +4,7 @@ mod gnome;
 mod images;
 mod manifest;
 mod recipe;
+mod setup;
 mod workflow;
 mod workspace;
 
@@ -74,6 +75,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
     let mut manifest = manifest::Manifest::new();
     let mut timings = Timings::default();
     let outcome = (|| {
+        recipe.validate_setup()?;
         check_dependencies(workflow::bounded(deadline, Duration::from_secs(5)))
             .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
         let workspace = Rc::new(workspace::Workspace::prepare()?);
@@ -108,7 +110,8 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         timings.install = Some(install_started.elapsed().as_millis());
         let app_ref = installed?;
         manifest.app_ref = Some(app_ref.to_string());
-        workspace.prepare_app_data(&app_ref)?;
+        let launch_args =
+            workspace.prepare_app_data(&app_ref, &recipe, &common.recipe, deadline)?;
         let mut desktop = gnome::Gnome::start(
             workspace.clone(),
             &layout,
@@ -125,6 +128,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         let launch_started = Instant::now();
         desktop.launch(
             &app_ref,
+            &launch_args,
             &layout,
             workflow::bounded(deadline, common.window_timeout),
         )?;
