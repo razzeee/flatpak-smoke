@@ -1,11 +1,16 @@
 #!/usr/bin/python3
 import gi
 import os
+import argparse
 from pathlib import Path
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--open", type=Path)
+options = parser.parse_args()
 
 
 class Fixture(Adw.Application):
@@ -49,6 +54,15 @@ class Fixture(Adw.Application):
                 window.set_content(empty)
         entry.connect("activate", search)
         box.append(label)
+        if options.open:
+            data = Path(os.environ["XDG_DATA_HOME"])
+            assert options.open == data / "example project/document.txt", (options.open, data)
+            assert (config / "settings.ini").read_text() == "welcome=false\n"
+            box.append(Gtk.Label(label=options.open.read_text().strip()))
+            box.append(Gtk.Label(label="Welcome disabled"))
+            print("seeded paths match sandbox XDG directories", flush=True)
+            options.open.write_text("Modified by app\n")
+            (config / "settings.ini").write_text("welcome=true\n")
         box.append(entry)
         button = Gtk.Button(label="Preferences", halign=Gtk.Align.CENTER)
         button.connect("clicked", lambda button: self.preferences(window))
@@ -75,4 +89,4 @@ class Fixture(Adw.Application):
         self.preferences_windows.append(window)
 
 
-Fixture(application_id="org.example.ScreenshotGtk").run(None)
+Fixture(application_id="org.example.ScreenshotGtk").run([])

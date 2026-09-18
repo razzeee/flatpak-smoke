@@ -130,6 +130,7 @@ impl Gnome {
     pub fn launch(
         &mut self,
         app_ref: &AppRef,
+        args: &[String],
         layout: &OutputLayout,
         deadline: Instant,
     ) -> anyhow::Result<()> {
@@ -180,6 +181,7 @@ impl Gnome {
                 "--env=QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1",
             ])
             .arg(app_ref.id())
+            .args(args)
             .stdin(Stdio::null())
             .stdout(File::create(&layout.app_stdout)?)
             .stderr(File::create(&layout.app_stderr)?)
