@@ -1,0 +1,45 @@
+name: Flatpak smoke and screenshots
+description: Test a built Flatpak or capture native-window screenshots from a recipe
+author: razzeee
+inputs:
+  mode:
+    description: verify or screenshots
+    default: verify
+  bundle:
+    description: Workspace-relative path to a .flatpak bundle
+  repo:
+    description: Workspace-relative path to a local OSTree repository, instead of bundle
+  app-ref:
+    description: Full app/ID/ARCH/BRANCH ref, required with repo
+  recipe:
+    description: Workspace-relative screenshot recipe path, required for screenshots
+  output:
+    description: Workspace-relative directory for results, screenshots, and logs
+    default: artifacts/flatpak-smoke
+  allow-network-remotes:
+    description: Allow downloading missing runtimes from Flathub
+    default: 'false'
+  args:
+    description: Additional CLI arguments, supporting quoted values without shell expansion
+  image:
+    description: Override the versioned image, for example with an image digest
+  user:
+    description: Run the application as root or nobody
+    default: root
+outputs:
+  output:
+    description: Workspace-relative output directory, also set when the CLI fails
+    value: ${{ steps.run.outputs.output }}
+runs:
+  using: composite
+  steps:
+    - name: Run Flatpak smoke
+      id: run
+      shell: bash
+      env:
+        FLATPAK_SMOKE_INPUTS: ${{ toJSON(inputs) }}
+        FLATPAK_SMOKE_ACTION_PATH: ${{ github.action_path }}
+      run: python3 "$FLATPAK_SMOKE_ACTION_PATH/action/run.py"
+branding:
+  icon: monitor
+  color: blue

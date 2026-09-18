@@ -155,3 +155,89 @@ fn screenshot_manifest_is_protected_without_force() {
         "existing manifest"
     );
 }
+
+#[test]
+fn invalid_setup_paths_and_launch_placeholders_are_rejected_before_installation() {
+    for (settings, message) in [
+        (
+            "setup: {files: [{source: '../sample', destination: 'data/sample'}]}",
+            "source must",
+        ),
+        (
+            "setup: {files: [{source: 'nested/../../sample', destination: 'data/sample'}]}",
+            "source must",
+        ),
+        (
+            "setup: {files: [{source: '/etc/passwd', destination: 'data/sample'}]}",
+            "source must",
+        ),
+        (
+            "setup: {files: [{source: '', destination: 'data/sample'}]}",
+            "source must",
+        ),
+        (
+            "setup: {files: [{source: sample, destination: '../outside'}]}",
+            "destination must",
+        ),
+        (
+            "setup: {files: [{source: sample, destination: '/data/file'}]}",
+            "destination must",
+        ),
+        (
+            "setup: {files: [{source: sample, destination: 'data/../../outside'}]}",
+            "destination must",
+        ),
+        (
+            "setup: {files: [{source: sample, destination: 'cache/file'}]}",
+            "destination must",
+        ),
+        (
+            "launch: {args: ['${HOME}/document']}",
+            "unsupported launch placeholder",
+        ),
+        (
+            "launch: {args: ['${APP_DATA']}",
+            "unterminated launch placeholder",
+        ),
+        ("launch: {args: [\"bad\\0argument\"]}", "NUL"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let recipe = temp.path().join("recipe.yml");
+        let bundle = temp.path().join("fixture.flatpak");
+        let output = temp.path().join("output");
+        std::fs::write(&bundle, "validation must precede installation").unwrap();
+        std::fs::write(
+            &recipe,
+            format!(
+                "version: 1\n{settings}\nsteps: [{{capture: {{name: main, caption: Main view}}}}]\n"
+            ),
+        )
+        .unwrap();
+        Command::cargo_bin("flatpak-smoke")
+            .unwrap()
+            .env("PATH", temp.path())
+            .arg("screenshot-bundle")
+            .arg(bundle)
+            .arg("--recipe")
+            .arg(recipe)
+            .arg("--output")
+            .arg(&output)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(message));
+        let result: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.join("result.json")).unwrap()).unwrap();
+        assert_eq!(result["status"], "failed");
+        assert!(
+            result["failure"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(message)
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.join("screenshots.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["captures"], serde_json::json!([]));
+        assert!(result["app_ref"].is_null());
+    }
+}

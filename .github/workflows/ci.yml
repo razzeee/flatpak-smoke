@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   pull_request:
   schedule:
     - cron: "17 3 * * *"
@@ -44,6 +46,12 @@ jobs:
       - name: Check native test process cleanup
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_native_cleanup.py
 
+      - name: Check action wrapper
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_action.py
+
+      - name: Check workflows
+        run: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -74,17 +82,45 @@ jobs:
           flatpak build-bundle target/fixture-repo target/org.example.FlatpakSmokeFixture.flatpak org.example.FlatpakSmokeFixture
 
       - name: Verify local fixture bundle
+        uses: ./
+        with:
+          bundle: target/org.example.FlatpakSmokeFixture.flatpak
+          image: flatpak-smoke
+          output: target/fixture-smoke-output
+          allow-network-remotes: 'true'
+          args: --force --screenshot-after-click "Click Me" --overall-timeout 5m
+
+      - name: Verify local fixture repository as non-root
+        uses: ./
+        with:
+          repo: target/fixture-repo
+          app-ref: app/org.example.FlatpakSmokeFixture/x86_64/master
+          image: flatpak-smoke
+          output: target/fixture-repo-action
+          allow-network-remotes: 'true'
+          user: nobody
+          args: --overall-timeout 5m
+
+      - name: Exercise action failure reporting
+        id: expected-failure
+        continue-on-error: true
+        uses: ./
+        with:
+          bundle: target/org.example.FlatpakSmokeFixture.flatpak
+          image: flatpak-smoke
+          output: target/fixture-action-failure
+          allow-network-remotes: 'true'
+          args: --window-timeout 1ms --overall-timeout 5m
+
+      - name: Assert action failure preserves artifacts
+        env:
+          OUTCOME: ${{ steps.expected-failure.outcome }}
+          OUTPUT: ${{ steps.expected-failure.outputs.output }}
         run: |
-          docker run --rm --privileged \
-            -v "$PWD:/workspace" \
-            -w /workspace \
-            flatpak-smoke \
-            verify-bundle target/org.example.FlatpakSmokeFixture.flatpak \
-            --output target/fixture-smoke-output \
-            --force \
-            --allow-network-remotes \
-            --screenshot-after-click "Click Me" \
-            --overall-timeout 5m
+          test "$OUTCOME" = failure
+          test "$OUTPUT" = target/fixture-action-failure
+          test -r "$OUTPUT/result.json"
+          python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))["status"] == "failed"' "$OUTPUT/result.json"
 
       - name: Assert smoke artifacts exist
         run: |
@@ -110,6 +146,8 @@ jobs:
             target/fixture-smoke-output/result.json
             target/fixture-smoke-output/logs/**
             target/fixture-smoke-output/screenshots/**
+            target/fixture-repo-action/**
+            target/fixture-action-failure/**
 
       - name: Verify readiness and exit fixture modes
         run: python3 tests/fixture_modes.py
@@ -139,6 +177,11 @@ jobs:
       - name: Build screenshot test image
         run: docker build --target e2e-tests -t screenshot-tests -f Containerfile.screenshots .
 
+      - name: Check production screenshot image
+        run: |
+          docker build -t screenshot-production -f Containerfile.screenshots .
+          docker run --rm --privileged --tmpfs /run screenshot-production
+
       - name: Build GTK and Qt fixture bundles
         run: |
           for toolkit in Gtk Qt; do
@@ -160,7 +203,47 @@ jobs:
           done
           docker run --rm --privileged --tmpfs /run -v "$PWD:/workspace" -w /workspace screenshot-tests \
             python3 tests/screenshot_workflow.py --binary /usr/local/bin/flatpak-smoke \
-            --repo target/screenshot-Gtk-repo --output target/screenshot-workflow-repo
+              --repo target/screenshot-Gtk-repo --output target/screenshot-workflow-repo
+
+      - name: Check seeded data and launch arguments in fresh profiles
+        run: |
+          docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
+            -v "$PWD:/workspace" -w /workspace screenshot-tests python3 tests/screenshot_setup.py
+
+      - name: Capture seeded bundle through the action
+        uses: ./
+        with:
+          mode: screenshots
+          bundle: target/org.example.ScreenshotGtk.flatpak
+          recipe: fixtures/screenshot/seeded.yml
+          output: target/screenshot-action-bundle
+          image: screenshot-production
+          allow-network-remotes: 'true'
+
+      - name: Capture seeded repository through the action as non-root
+        uses: ./
+        with:
+          mode: screenshots
+          repo: target/screenshot-Gtk-repo
+          app-ref: app/org.example.ScreenshotGtk/x86_64/master
+          recipe: fixtures/screenshot/seeded.yml
+          output: target/screenshot-action-repo
+          image: screenshot-tests
+          user: nobody
+          allow-network-remotes: 'true'
+
+      - name: Replace non-root action output
+        uses: ./
+        with:
+          mode: screenshots
+          repo: target/screenshot-Gtk-repo
+          app-ref: app/org.example.ScreenshotGtk/x86_64/master
+          recipe: fixtures/screenshot/seeded.yml
+          output: target/screenshot-action-repo
+          image: screenshot-tests
+          user: nobody
+          allow-network-remotes: 'true'
+          args: --force
 
       - name: Check recipe failures and fresh profiles
         run: |
@@ -177,6 +260,56 @@ jobs:
             target/native-capture/**
             target/screenshot-workflow-*/**
             target/screenshot-failures/**
+            target/screenshot-setup-*/**
+            target/screenshot-action-*/**
+
+  publish:
+    name: Publish ${{ matrix.image }}
+    needs: [cargo-checks, fixture-end-to-end, screenshot-end-to-end]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: flatpak-smoke
+            file: Containerfile
+          - image: flatpak-smoke-screenshots
+            file: Containerfile.screenshots
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check release image version matches the action
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 -c 'import os, pathlib; assert pathlib.Path("action/image-version").read_text().strip() == os.environ["RELEASE_TAG"], "Update action/image-version before tagging a release"'
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: metadata
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
+          tags: |
+            type=sha,format=long
+            type=ref,event=tag
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
   screenshot-compatibility:
     name: Real-app screenshot compatibility

@@ -1,0 +1,21 @@
+version: 1
+setup:
+  files:
+    - source: sample-data
+      destination: data/example project
+    - source: sample-settings.ini
+      destination: config/settings.ini
+launch:
+  args:
+    - --open
+    - "${APP_DATA}/example project/document.txt"
+window:
+  width: 900
+  height: 650
+steps:
+  - wait_text: Sample document
+  - wait_text: Welcome disabled
+  - wait_text: Ready to capture
+  - capture:
+      name: seeded
+      caption: Open a sample document in a fresh profile
