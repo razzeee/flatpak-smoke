@@ -300,7 +300,7 @@ jobs:
           tags: |
             type=sha,format=long
             type=ref,event=tag
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.file }}
