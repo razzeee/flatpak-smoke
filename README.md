@@ -9,7 +9,7 @@ Build a `.flatpak` bundle in your app's repository. The examples below run after
 that build on a **Linux amd64 runner with Docker and privileged-container support**.
 Replace `build/org.example.App.flatpak` with your bundle path.
 
-The examples target the first release, **v0.1.0**. Its action tag and GHCR images
+The examples target **v0.1.2**. Its action tag and GHCR images
 must be published before these versioned examples can run. Until then, use the
 [source-build instructions](docs/reference.md#building-from-source) and the
 action's `image` override. Publication happens through CI; see the
@@ -21,7 +21,7 @@ Add these steps after checkout and your Flatpak build in an `ubuntu-latest` job:
 
 ```yaml
 - name: Check that the app starts
-  uses: razzeee/flatpak-smoke@v0.1.0
+  uses: razzeee/flatpak-smoke@v0.1.2
   with:
     bundle: build/org.example.App.flatpak
     output: artifacts/smoke
@@ -117,7 +117,7 @@ for the copy rules.
 
 ```yaml
 - name: Capture listing screenshots
-  uses: razzeee/flatpak-smoke@v0.1.0
+  uses: razzeee/flatpak-smoke@v0.1.2
   with:
     mode: screenshots
     bundle: build/org.example.App.flatpak
@@ -145,17 +145,17 @@ Review the images before publishing them.
 Run these commands from your app's checkout, using the same bundle and recipe:
 
 ```sh
-docker pull ghcr.io/razzeee/flatpak-smoke:v0.1.0
+docker pull ghcr.io/razzeee/flatpak-smoke:v0.1.2
 docker run --rm --privileged \
   -v "$PWD:/workspace" -w /workspace \
-  ghcr.io/razzeee/flatpak-smoke:v0.1.0 \
+  ghcr.io/razzeee/flatpak-smoke:v0.1.2 \
   verify-bundle build/org.example.App.flatpak \
   --output artifacts/smoke --allow-network-remotes --overall-timeout 5m
 
-docker pull ghcr.io/razzeee/flatpak-smoke-screenshots:v0.1.0
+docker pull ghcr.io/razzeee/flatpak-smoke-screenshots:v0.1.2
 docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
   -v "$PWD:/workspace" -w /workspace \
-  ghcr.io/razzeee/flatpak-smoke-screenshots:v0.1.0 \
+  ghcr.io/razzeee/flatpak-smoke-screenshots:v0.1.2 \
   flatpak-smoke screenshot-bundle build/org.example.App.flatpak \
   --recipe ci/screenshots.yml --output artifacts/capture --allow-network-remotes
 ```
