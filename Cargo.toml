@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "CI-friendly smoke verifier for freshly built Flatpak applications"
 
 [dependencies]
-aes = "0.8"
+aes = "0.9"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 libc = "0.2"
