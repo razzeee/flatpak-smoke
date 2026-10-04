@@ -5,7 +5,7 @@ COPY src ./src
 COPY desktop ./desktop
 RUN cargo build --release --locked
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim AS runtime
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -22,3 +22,10 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/flatpak-smoke /usr/local/bin/flatpak-smoke
 ENTRYPOINT ["flatpak-smoke"]
+
+FROM runtime AS e2e-tests
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 \
+  && rm -rf /var/lib/apt/lists/*
+
+FROM runtime AS final

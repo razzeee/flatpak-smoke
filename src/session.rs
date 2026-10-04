@@ -83,7 +83,7 @@ impl<'a> SessionRunner<'a> {
             weston: weston.clone(),
             app: None,
         };
-        let session_result = match compositor.check() {
+        let session_result = match compositor.check(self.overall_deadline) {
             Ok(()) => session_result,
             Err(error) => Err(error.with_screenshots(match session_result {
                 Ok(success) => success.screenshot_paths,
@@ -128,9 +128,56 @@ impl<'a> SessionRunner<'a> {
         // and immediately reconnecting can race Weston's VNC client teardown.
         let baseline_path = self.layout.logs_dir.join("wayland-baseline.png");
         screenshotter.capture_once_with_client(&mut session_client, &baseline_path)?;
+        // The shell can still be painting its background after the VNC server
+        // becomes usable. A changing backdrop would merge every later window
+        // into one fullscreen foreground region, hiding blank-client failures.
+        let baseline_candidate = self.layout.logs_dir.join("wayland-baseline-candidate.png");
+        let mut stable = FrameObservation::default();
+        loop {
+            screenshotter.capture_once_with_client(&mut session_client, &baseline_candidate)?;
+            let changed = screenshotter.screenshots_differ_by_threshold(
+                &baseline_path,
+                &baseline_candidate,
+                0,
+            )?;
+            if stable.observe(!changed, Instant::now()) {
+                break;
+            }
+            if changed {
+                fs::copy(&baseline_candidate, &baseline_path).map_err(SessionError::internal)?;
+            }
+            sleep_before_checked(
+                Duration::from_millis(150),
+                screenshotter.deadline.get(),
+                &screenshotter.health,
+            )
+            .map_err(SessionError::internal)?;
+        }
 
         let _keyring_cleanup = KeyringCleanup(&self.env);
-        let app = Rc::new(RefCell::new(self.spawn_app(app_ref, display)?));
+        let launcher_finished =
+            PathBuf::from(env_value(&self.env, "XDG_RUNTIME_DIR").ok_or_else(|| {
+                SessionError::new(
+                    FailureReason::InternalError,
+                    "missing private runtime directory",
+                )
+            })?)
+            .join("app-launcher-finished");
+        let app = Rc::new(AppProcess {
+            launcher: RefCell::new(self.spawn_app(app_ref, display, &launcher_finished)?),
+            launcher_finished: Some(launcher_finished),
+            app_id: flatpak_run_target(app_ref)
+                .split('/')
+                .next()
+                .unwrap_or(app_ref)
+                .to_string(),
+            env: self.env.clone(),
+            stopped: Cell::new(false),
+            last_instance_check: Cell::new(None),
+        });
+        self.layout
+            .append_runner_log(format!("app launcher pid: {}", app.launcher.borrow().id()))
+            .map_err(SessionError::internal)?;
         processes.app = Some(app.clone());
         screenshotter.health = processes.health_check();
         let mut screenshots = Vec::new();
@@ -220,11 +267,22 @@ impl<'a> SessionRunner<'a> {
         })();
 
         // Prefer a process exit over a secondary OCR/socket error caused by that exit.
-        let result = processes
-            .check()
-            .and(result)
-            .map_err(|error| error.with_screenshots(screenshots));
-        terminate_child(&mut app.borrow_mut());
+        // A final instance probe shares the active stage budget too. If that
+        // budget has expired, preserve the original classified stage failure.
+        let result = match processes.check(screenshotter.deadline.get()) {
+            Err(error)
+                if result.is_ok()
+                    || matches!(
+                        error.reason,
+                        FailureReason::EarlyExit | FailureReason::DisplayExited
+                    ) =>
+            {
+                Err(error)
+            }
+            _ => result,
+        }
+        .map_err(|error| error.with_screenshots(screenshots));
+        app.terminate();
         result
     }
 
@@ -511,7 +569,12 @@ impl<'a> SessionRunner<'a> {
         Ok(requested.min(remaining))
     }
 
-    fn spawn_app(&self, app_ref: &str, display: &str) -> Result<Child, SessionError> {
+    fn spawn_app(
+        &self,
+        app_ref: &str,
+        display: &str,
+        launcher_finished: &Path,
+    ) -> Result<Child, SessionError> {
         let stdout = File::create(&self.layout.app_stdout).map_err(SessionError::internal)?;
         let stderr = File::create(&self.layout.app_stderr).map_err(SessionError::internal)?;
         let run_target = flatpak_run_target(app_ref);
@@ -524,6 +587,7 @@ impl<'a> SessionRunner<'a> {
                 START_DESKTOP_SERVICES_AND_RUN_FLATPAK,
                 "flatpak-smoke-session",
             ])
+            .arg(launcher_finished)
             .args([
                 "--env=GDK_BACKEND=wayland",
                 "--env=QT_QPA_PLATFORM=wayland",
@@ -586,11 +650,19 @@ impl FrameObservation {
 #[derive(Clone)]
 struct SessionProcesses {
     weston: Rc<RefCell<Child>>,
-    app: Option<Rc<RefCell<Child>>>,
+    app: Option<Rc<AppProcess>>,
 }
 
 impl SessionProcesses {
-    fn check(&self) -> Result<(), SessionError> {
+    fn check(&self, deadline: Instant) -> Result<(), SessionError> {
+        self.check_with_cache(deadline, false)
+    }
+
+    fn check_with_cache(
+        &self,
+        deadline: Instant,
+        cache_instances: bool,
+    ) -> Result<(), SessionError> {
         if let Some(status) = self
             .weston
             .borrow_mut()
@@ -602,34 +674,136 @@ impl SessionProcesses {
                 format!("Weston exited during verification with {status}"),
             ));
         }
-        if let Some(app) = &self.app
-            && let Some(status) = app
-                .borrow_mut()
-                .try_wait()
-                .map_err(SessionError::internal)?
-        {
-            return Err(SessionError::new(
-                FailureReason::EarlyExit,
-                format!("app exited during verification with {status}"),
-            ));
+        if let Some(app) = &self.app {
+            app.check(deadline, cache_instances)?;
         }
         Ok(())
     }
 
     fn health_check(&self) -> HealthCheck {
         let processes = self.clone();
-        HealthCheck::new(move |_| {
+        HealthCheck::new(move |deadline| {
             processes
-                .check()
+                .check_with_cache(deadline, true)
                 .map_err(|error| std::io::Error::other(error.message))
         })
     }
 }
 
+struct AppProcess {
+    launcher: RefCell<Child>,
+    launcher_finished: Option<PathBuf>,
+    app_id: String,
+    env: Vec<(OsString, OsString)>,
+    stopped: Cell<bool>,
+    last_instance_check: Cell<Option<Instant>>,
+}
+
+impl AppProcess {
+    fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new("flatpak");
+        command.envs(self.env.iter().cloned());
+        command
+    }
+
+    fn check(&self, deadline: Instant, cache_instances: bool) -> Result<(), SessionError> {
+        let status = self
+            .launcher
+            .borrow_mut()
+            .try_wait()
+            .map_err(SessionError::internal)?;
+        let handed_off = self
+            .launcher_finished
+            .as_ref()
+            .is_some_and(|path| path.is_file());
+        if status.is_none() && !handed_off {
+            return Ok(());
+        }
+        // A successful launcher may have handed off to another Flatpak instance.
+        // ps reads this run's private XDG_RUNTIME_DIR, excluding other runs.
+        if status.is_none_or(|status| status.success()) {
+            // VNC checks health for every partial read, including each pixel row.
+            // Bound ps polling rather than spawning hundreds of probes per frame.
+            // Final success checks bypass this cache.
+            if cache_instances
+                && self
+                    .last_instance_check
+                    .get()
+                    .is_some_and(|last| last.elapsed() < Duration::from_millis(100))
+            {
+                return Ok(());
+            }
+            let output = self
+                .command()
+                .args(["ps", "--columns=application"])
+                .output_before_checked(
+                    deadline.min(Instant::now() + Duration::from_secs(1)),
+                    &HealthCheck::default(),
+                )
+                .map_err(SessionError::internal)?;
+            if !output.status.success() {
+                return Err(SessionError::new(
+                    FailureReason::InternalError,
+                    format!(
+                        "checking app instances: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                ));
+            }
+            if String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|id| id.trim() == self.app_id)
+            {
+                self.last_instance_check.set(Some(Instant::now()));
+                return Ok(());
+            }
+        }
+        let message = match status {
+            Some(status) => format!("app exited during verification with {status}"),
+            None => "app exited during verification; no private Flatpak instance remains".into(),
+        };
+        Err(SessionError::new(FailureReason::EarlyExit, message))
+    }
+
+    fn terminate(&self) {
+        if self.stopped.replace(true) {
+            return;
+        }
+        // Instance cleanup reaches detached processes outside the launcher group.
+        // Do not use remaining(): cleanup must also run after SIGINT/SIGTERM.
+        if let Ok(mut cleanup) = self
+            .command()
+            .args(["kill", &self.app_id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn_managed()
+        {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && matches!(cleanup.try_wait(), Ok(None)) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        self.launcher.borrow_mut().terminate();
+    }
+}
+
+impl Drop for AppProcess {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
 const START_DESKTOP_SERVICES_AND_RUN_FLATPAK: &str = r#"
 set -eu
+launcher_finished=$1
+shift
 printf '\n' | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-exec flatpak run "$@"
+flatpak run --user "$@"
+# dbus-run-session must outlive a successful launcher handoff. Rust observes
+# this marker and checks private instances with the active stage deadline.
+: > "$launcher_finished"
+exec sleep infinity
 "#;
 
 #[derive(Debug, Clone)]
@@ -827,43 +1001,114 @@ impl Screenshotter {
     }
 
     fn screenshot_has_content(&self, path: &Path) -> Result<bool, SessionError> {
+        // VNC exposes desktop pixels, not native window geometry. Find connected
+        // foreground regions relative to the pre-launch frame, then measure their
+        // interiors separately. Measuring the desktop (or a union of windows)
+        // counts a blank window's contrast with the wallpaper as app content.
         let output = self
-            .command("identify")
-            .args(["-format", "%[fx:standard_deviation]"])
+            .command("convert")
+            .arg(self.runner_log.with_file_name("wayland-baseline.png"))
             .arg(path)
-            .output_before_checked(self.deadline.get(), &self.health);
-
-        match output {
-            Ok(output) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                parse_standard_deviation(&stdout)
-                    .map(|value| value > SCREENSHOT_CONTENT_STANDARD_DEVIATION_THRESHOLD)
-                    .ok_or_else(|| {
-                        SessionError::new(
-                            FailureReason::ScreenshotFailed,
-                            format!(
-                                "failed to parse ImageMagick standard deviation: {}",
-                                stdout.trim()
-                            ),
-                        )
-                    })
-            }
-            Ok(output) => Err(SessionError::new(
+            .args([
+                "-compose",
+                "difference",
+                "-composite",
+                "-colorspace",
+                "Gray",
+                "-alpha",
+                "off",
+                "-threshold",
+                "0",
+                "-define",
+                "connected-components:verbose=true",
+                "-connected-components",
+                "8",
+                "null:",
+            ])
+            .output_before_checked(self.deadline.get(), &self.health)
+            .map_err(|error| {
+                SessionError::new(
+                    FailureReason::ScreenshotFailed,
+                    format!("locating screenshot foreground: {error}"),
+                )
+            })?;
+        if !output.status.success() {
+            return Err(SessionError::new(
                 FailureReason::ScreenshotFailed,
                 format!(
-                    "failed to inspect screenshot with ImageMagick: {}",
+                    "locating screenshot foreground: {}",
                     String::from_utf8_lossy(&output.stderr).trim()
                 ),
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(SessionError::new(
-                FailureReason::DependencyFailed,
-                "missing required tool: identify",
-            )),
-            Err(error) => Err(SessionError::new(
-                FailureReason::ScreenshotFailed,
-                format!("failed to run ImageMagick identify: {error}"),
-            )),
+            ));
         }
+        let components = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for region in components.lines().filter_map(|line| {
+            matches!(
+                line.split_whitespace().last(),
+                Some("gray(255)" | "gray(100%)")
+            )
+            .then(|| parse_connected_component(line))
+            .flatten()
+        }) {
+            // Include room for CSD shadows as well as borders. This remains a
+            // heuristic: very small windows or header-only content cannot qualify.
+            let inset = 32;
+            let header = (region.height / 4).min(64);
+            let width = region.width - inset * 2;
+            let height = region.height - header - inset * 2;
+            if region.area <= SCREENSHOT_DIFF_PIXEL_THRESHOLD as i32 || width <= 0 || height <= 0 {
+                continue;
+            }
+            let geometry = format!(
+                "{width}x{height}+{}+{}",
+                region.x + inset,
+                region.y + header + inset
+            );
+            let output = self
+                .command("convert")
+                .arg(path)
+                .args([
+                    "-crop",
+                    &geometry,
+                    "+repage",
+                    "-format",
+                    "%[fx:standard_deviation]",
+                    "info:",
+                ])
+                .output_before_checked(self.deadline.get(), &self.health)
+                .map_err(|error| {
+                    SessionError::new(
+                        FailureReason::ScreenshotFailed,
+                        format!("measuring screenshot interior: {error}"),
+                    )
+                })?;
+            if !output.status.success() {
+                return Err(SessionError::new(
+                    FailureReason::ScreenshotFailed,
+                    format!(
+                        "measuring screenshot interior: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                ));
+            }
+            let deviation = parse_standard_deviation(&String::from_utf8_lossy(&output.stdout))
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    SessionError::new(
+                        FailureReason::ScreenshotFailed,
+                        "invalid screenshot interior deviation",
+                    )
+                })?;
+            self.append_log(format!("content region {geometry}: deviation {deviation}"))?;
+            if deviation > SCREENSHOT_CONTENT_STANDARD_DEVIATION_THRESHOLD {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn detect_app_error_text(&self, path: &Path) -> Result<Option<&'static str>, SessionError> {
@@ -2112,6 +2357,61 @@ mod tests {
     use std::thread;
 
     #[test]
+    #[ignore = "requires ImageMagick; also covered by the blank-client end-to-end fixture"]
+    fn smoke_content_rejects_blank_windows_and_decorations() {
+        let temp = tempfile::tempdir().unwrap();
+        let baseline = temp.path().join("wayland-baseline.png");
+        let candidate = temp.path().join("candidate.png");
+        assert!(
+            std::process::Command::new("convert")
+                .args(["-size", "1280x720", "xc:#202020"])
+                .arg(&baseline)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let screenshotter = Screenshotter::new(
+            "unused",
+            vec![],
+            temp.path().join("runner.log"),
+            Instant::now() + Duration::from_secs(30),
+        );
+        for (drawing, expected) in [
+            ("", false),
+            ("fill white rectangle 80,80 679,479", false),
+            (
+                "fill #181818 rectangle 60,60 699,499 fill white rectangle 80,80 679,479 fill #888888 rectangle 80,80 679,119",
+                false,
+            ),
+            (
+                "fill white rectangle 80,80 679,479 fill black rectangle 200,250 400,270",
+                true,
+            ),
+            (
+                "fill #242424 rectangle 80,80 679,479 fill white rectangle 200,250 400,270",
+                true,
+            ),
+            ("fill white rectangle 0,0 1279,719", false),
+            (
+                "fill white rectangle 80,80 379,379 fill white rectangle 700,200 999,499",
+                false,
+            ),
+        ] {
+            let mut command = std::process::Command::new("convert");
+            command.arg(&baseline);
+            if !drawing.is_empty() {
+                command.args(["-draw", drawing]);
+            }
+            assert!(command.arg(&candidate).status().unwrap().success());
+            assert_eq!(
+                screenshotter.screenshot_has_content(&candidate).unwrap(),
+                expected,
+                "{drawing}"
+            );
+        }
+    }
+
+    #[test]
     fn transient_content_does_not_satisfy_readiness() {
         let started = Instant::now();
         let mut observation = FrameObservation::default();
@@ -2150,18 +2450,121 @@ mod tests {
         ))
     }
 
+    fn exited_app(temp: &Path, status: i32, helper: &str) -> AppProcess {
+        use std::os::unix::fs::PermissionsExt;
+        let flatpak = temp.join("flatpak");
+        fs::write(&flatpak, helper).unwrap();
+        fs::set_permissions(&flatpak, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut launcher = std::process::Command::new("sh")
+            .args(["-c", &format!("exit {status}")])
+            .spawn_managed()
+            .unwrap();
+        launcher.wait().unwrap();
+        AppProcess {
+            launcher: RefCell::new(launcher),
+            launcher_finished: None,
+            app_id: "org.example.Test".into(),
+            env: vec![
+                ("PATH".into(), temp.as_os_str().to_owned()),
+                ("XDG_RUNTIME_DIR".into(), temp.as_os_str().to_owned()),
+            ],
+            stopped: Cell::new(false),
+            last_instance_check: Cell::new(None),
+        }
+    }
+
+    #[test]
+    fn detached_app_is_live_until_its_private_instance_exits_and_is_cleaned_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = exited_app(
+            temp.path(),
+            0,
+            "#!/bin/sh\ncase $1 in\nps) /bin/cat \"$XDG_RUNTIME_DIR/instances\";;\nkill) printf '%s' \"$2\" >> \"$XDG_RUNTIME_DIR/killed\";;\nesac\n",
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        fs::write(temp.path().join("instances"), "org.example.Test\n").unwrap();
+        assert!(app.check(deadline, false).is_ok());
+        for _ in 0..720 {
+            assert!(app.check(deadline, true).is_ok());
+        }
+        fs::write(temp.path().join("instances"), "org.example.Other\n").unwrap();
+        // A final success check must query again even inside the polling interval.
+        assert_eq!(
+            app.check(deadline, false).unwrap_err().reason,
+            FailureReason::EarlyExit
+        );
+        app.terminate();
+        drop(app);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("killed")).unwrap(),
+            "org.example.Test"
+        );
+    }
+
+    #[test]
+    fn failed_launcher_is_not_hidden_by_a_surviving_instance() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = exited_app(
+            temp.path(),
+            42,
+            "#!/bin/sh\nif [ \"$1\" = ps ]; then printf probed > \"$XDG_RUNTIME_DIR/probed\"; printf 'org.example.Test\\n'; fi\n",
+        );
+        assert_eq!(
+            app.check(Instant::now() + Duration::from_secs(5), false)
+                .unwrap_err()
+                .reason,
+            FailureReason::EarlyExit
+        );
+        assert!(!temp.path().join("probed").exists());
+    }
+
+    #[test]
+    fn detached_app_probe_shares_deadline_and_cleanup_runs_after_expiry() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = exited_app(
+            temp.path(),
+            0,
+            "#!/bin/sh\ncase $1 in\nps) exec /bin/sleep 30;;\nkill) printf killed > \"$XDG_RUNTIME_DIR/killed\";;\nesac\n",
+        );
+        let started = Instant::now();
+        let error = app
+            .check(started + Duration::from_millis(150), false)
+            .unwrap_err();
+        assert!(
+            error.message.contains("deadline elapsed"),
+            "{}",
+            error.message
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(app);
+        assert!(temp.path().join("killed").is_file());
+    }
+
     #[test]
     fn process_exits_interrupt_ocr_before_its_deadline() {
         use std::os::unix::fs::PermissionsExt;
         for compositor in [false, true] {
             let processes = SessionProcesses {
                 weston: sleeping_process(),
-                app: Some(sleeping_process()),
+                app: Some(Rc::new(AppProcess {
+                    launcher: RefCell::new(
+                        std::process::Command::new("sleep")
+                            .arg("30")
+                            .spawn_managed()
+                            .unwrap(),
+                    ),
+                    launcher_finished: None,
+                    app_id: "org.example.Test".into(),
+                    env: vec![],
+                    // This test owns only a sleep process, not a Flatpak instance.
+                    stopped: Cell::new(true),
+                    last_instance_check: Cell::new(None),
+                })),
             };
             let watched = if compositor {
                 &processes.weston
             } else {
-                processes.app.as_ref().unwrap()
+                &processes.app.as_ref().unwrap().launcher
             };
             let temp = tempfile::tempdir().unwrap();
             let helper = temp.path().join("tesseract");
@@ -2186,7 +2589,10 @@ mod tests {
             );
             screenshotter.health = processes.health_check();
             let result = screenshotter.detect_app_error_text(&temp.path().join("frame.png"));
-            let error = processes.check().and(result).unwrap_err();
+            let error = processes
+                .check(started + Duration::from_secs(10))
+                .and(result)
+                .unwrap_err();
             assert_eq!(
                 error.reason,
                 if compositor {
@@ -2228,7 +2634,10 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(
-            processes.check().unwrap_err().reason,
+            processes
+                .check(started + Duration::from_secs(10))
+                .unwrap_err()
+                .reason,
             FailureReason::DisplayExited
         );
         assert!(started.elapsed() < Duration::from_secs(2));

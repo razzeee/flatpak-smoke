@@ -40,6 +40,12 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets
 
+      - name: Check smoke content detection with real image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends imagemagick
+          cargo test smoke_content_rejects_blank_windows_and_decorations -- --ignored
+
       - name: Check compatibility report validation
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/compatibility -p test_matrix.py
 
@@ -152,13 +158,22 @@ jobs:
       - name: Verify readiness and exit fixture modes
         run: python3 tests/fixture_modes.py
 
+      - name: Verify fresh smoke profiles and detached-app lifecycle
+        run: |
+          docker build --target e2e-tests -t smoke-lifecycle-tests -f Containerfile .
+          docker run --rm --privileged --tmpfs /run \
+            -v "$PWD:/workspace" -w /workspace --entrypoint python3 smoke-lifecycle-tests \
+            tests/smoke_lifecycle.py
+
       - name: Upload fixture mode outputs
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: fixture-mode-outputs
           if-no-files-found: warn
-          path: target/fixture-modes/**
+          path: |
+            target/fixture-modes/**
+            target/smoke-lifecycle/**
 
   screenshot-end-to-end:
     name: Native screenshot recipes
