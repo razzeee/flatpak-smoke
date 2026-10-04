@@ -1,7 +1,7 @@
 use super::{desktop::Window, workspace::Workspace};
 use crate::{
+    analysis::find_ocr_text_matches,
     process::{BoundedCommand, HealthCheck},
-    session::find_ocr_text_matches,
 };
 use anyhow::{Context, ensure};
 use std::{
