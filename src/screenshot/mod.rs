@@ -5,6 +5,7 @@ mod images;
 mod manifest;
 mod recipe;
 mod setup;
+mod snapshot;
 mod workflow;
 mod workspace;
 
