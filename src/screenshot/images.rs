@@ -4,11 +4,7 @@ use crate::{
     process::{BoundedCommand, HealthCheck},
 };
 use anyhow::{Context, ensure};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Instant,
-};
+use std::{fs, path::Path, time::Instant};
 
 pub struct Images<'a> {
     pub workspace: &'a Workspace,
@@ -177,9 +173,5 @@ impl Images<'_> {
             }
         }
         matches
-    }
-
-    pub fn candidate_path(&self) -> PathBuf {
-        self.logs.join("last-candidate.png")
     }
 }
