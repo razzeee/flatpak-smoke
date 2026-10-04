@@ -151,7 +151,16 @@ impl<'a> SessionRunner<'a> {
                 screenshotter.deadline.get(),
                 &screenshotter.health,
             )
-            .map_err(SessionError::internal)?;
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    SessionError::new(
+                        FailureReason::DisplayStartFailed,
+                        format!("compositor background did not stabilize before launch: {error}"),
+                    )
+                } else {
+                    SessionError::internal(error)
+                }
+            })?;
         }
 
         let _keyring_cleanup = KeyringCleanup(&self.env);
