@@ -6,10 +6,10 @@ use super::{
     recipe::{Action, Recipe, Step},
 };
 use crate::{
+    analysis::FrameObservation,
     output::OutputLayout,
     process::{remaining, sleep_before_checked},
     result::FailureReason,
-    session::FrameObservation,
 };
 use anyhow::{Context, ensure};
 use std::{
