@@ -78,12 +78,12 @@ For each verification run, `flatpak-smoke`:
 
 1. Prepares the output directory.
 2. Checks required runtime tools.
-3. Creates an isolated temporary Flatpak/XDG user environment.
+3. Creates an isolated temporary home, Flatpak user installation, and XDG environment. App data starts fresh for each run, including when using the host CLI.
 4. Writes an `xdg-desktop-portal` config that prefers the GTK portal backend and GNOME Keyring for the Secret portal.
 5. Installs the bundle or repo ref.
-6. Starts a headless Weston Wayland compositor with a local VNC backend for screenshots and pointer input.
+6. Starts a headless Weston Wayland compositor with a local VNC backend for screenshots and pointer input, then waits for its background to stop changing before launching the app.
 7. Launches the app through `dbus-run-session` and `flatpak run`.
-8. Waits for visible app content to persist across at least three samples spanning at least 750ms, comparing each sample with the compositor background. A blank sample restarts observation; animation is allowed.
+8. Waits for visible app content to persist across at least three samples spanning at least 750ms. Each sample is compared with the compositor background to locate foreground regions; their interiors must contain visible detail. A blank sample restarts observation; animation is allowed.
 9. Captures screenshots and OCR-checks them for fatal error markers.
 10. Writes `result.json`.
 
@@ -95,7 +95,7 @@ A run fails when any of these happen:
 - The artifact path or app ref is invalid.
 - The app cannot be installed.
 - The headless Wayland compositor cannot start.
-- The app exits at any point before verification finishes, including during OCR or after a click. This reports `early_exit`.
+- The app exits at any point before verification finishes, including during OCR or after a click. This reports `early_exit`. A successful launcher exit is allowed while a matching Flatpak instance remains in the run's private runtime directory; an unsuccessful launcher exit still fails.
 - Weston exits after startup. This reports `display_exited`.
 - Visible app content does not persist for the observation period before `--window-timeout`.
 - Screenshot OCR finds fatal markers such as `secret portal error`, `unexpected error`, `fatal error`, or `unhandled exception`.
@@ -108,10 +108,19 @@ By default, a successful run captures one screenshot:
 screenshots/000-window-visible.png
 ```
 
-Every requested screenshot must contain visible app content. A run fails if a screenshot file is captured but only contains a solid compositor background.
+Every requested screenshot must contain visible app content. A solid compositor
+background or a blank window does not qualify. The verifier estimates window
+regions from connected pixel differences against the pre-launch background. It
+checks each region separately, excluding a 32-pixel edge margin for shadows and
+borders and an additional header strip of up to 64 pixels. This is a heuristic,
+not native window geometry: tiny windows, overlapping windows, unusual shadows,
+or meaningful content confined to the header can defeat this estimate. The
+saved screenshot retains the full desktop pixels.
 
 The runner checks app and compositor liveness while waiting on image tools, VNC
-I/O, and interaction delays, and once more before reporting success. A short
+I/O, and interaction delays, and once more before reporting success. After a
+launcher handoff, instance probes share the active deadline and are cached for
+up to 100ms during I/O. The final success check bypasses that cache. A short
 observation period cannot prove that startup has finished or distinguish a
 long-lived splash screen from the main window.
 
@@ -196,8 +205,11 @@ each owned process group gets up to 200ms to stop before forced termination.
 
 `SIGINT` and `SIGTERM` cancel the run through the normal failure path. The runner
 cleans up its app, compositor, and helper process groups, including background
-children whose parent has already exited. The daemonized keyring unlock service
-is cleaned up separately using the run's private runtime directory.
+children whose parent has already exited. The private D-Bus session remains alive
+after a successful launcher handoff. Cleanup also stops matching Flatpak instances
+that detached from the launcher process group, with up to two seconds for the
+instance cleanup command. The daemonized keyring unlock service is cleaned up
+separately using the run's private runtime directory.
 
 ```sh
 cargo run -- verify-bundle ./build/org.example.App.flatpak \
@@ -412,9 +424,10 @@ supports the supplied argument and file format. Inspect `result.json` and
 ## Readiness regression fixtures
 
 The Wayland fixture accepts `FLATPAK_SMOKE_FIXTURE_MODE` with `normal`, `delayed`,
-`never-draw`, `crash-after-frame`, `animated`, or `exit-after-click`. The default
-is `normal`. These modes exercise delayed rendering, window timeouts, crashes
-during observation, continuously changing content, and exits during interaction.
+`never-draw`, `blank-client`, `blank-after-click`, `delayed-content`,
+`crash-after-frame`, `animated`, or `exit-after-click`. The default is `normal`.
+These modes exercise delayed rendering, presented-but-blank windows, content that
+disappears after interaction, crashes during observation, and animation.
 
 After building the container and fixture bundle, run the mode checks with:
 
@@ -424,6 +437,14 @@ python3 tests/fixture_modes.py
 
 CI runs these checks on pull requests and retains each mode's result and images
 under `target/fixture-modes/`.
+
+The `e2e-tests` target in `Containerfile` also supplies Python for
+`tests/smoke_lifecycle.py`. That suite runs twice against the same caller home to
+check fresh app profiles, exercises a detached launcher, and cancels a detached
+run while checking that its sandbox processes stop. CI retains the evidence under
+`target/smoke-lifecycle/`. The standalone image-content regression can be run with
+`cargo test smoke_content_rejects_blank_windows_and_decorations -- --ignored`
+on a host with ImageMagick.
 
 ## Screenshot recipes
 

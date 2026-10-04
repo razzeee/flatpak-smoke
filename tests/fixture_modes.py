@@ -17,6 +17,9 @@ def main():
     cases = [
         ("delayed", None, False),
         ("never-draw", "window_timeout", False),
+        ("blank-client", "window_timeout", False),
+        ("blank-after-click", "screenshot_failed", True),
+        ("delayed-content", None, False),
         ("crash-after-frame", "early_exit", False),
         ("animated", None, True),
         ("exit-after-click", "early_exit", True),
@@ -31,7 +34,7 @@ def main():
             "--entrypoint", args.binary, args.image,
             "verify-bundle", args.bundle,
             "--output", str(output), "--force", "--allow-network-remotes",
-            "--window-timeout", "3s" if mode == "never-draw" else "8s",
+            "--window-timeout", "3s" if mode in ("never-draw", "blank-client") else "8s",
             "--overall-timeout", "5m",
         ]
         if click:
@@ -60,6 +63,12 @@ def main():
             if mode == "exit-after-click":
                 assert "fixture: exiting after click" in stdout, stdout
                 assert "screenshots/000-window-visible.png" in result["screenshots"], result
+            if mode == "blank-after-click":
+                assert "fixture: client blanked" in stdout, stdout
+                assert "screenshots/000-window-visible.png" in result["screenshots"], result
+            if mode == "delayed-content":
+                assert "fixture: content revealed" in stdout, stdout
+                assert result["timings_ms"]["launch_to_window"] >= 2250, result
             if mode == "animated":
                 assert "screenshots/001-after-click-click-me.png" in result["screenshots"], result
         except (AssertionError, OSError, ValueError) as error:

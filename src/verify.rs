@@ -211,6 +211,13 @@ fn isolated_flatpak_env(workspace: &Path) -> anyhow::Result<Vec<(OsString, OsStr
     write_portal_config(workspace)?;
 
     Ok(vec![
+        (OsString::from("HOME"), workspace.as_os_str().to_owned()),
+        // Flatpak's explicit installation override takes precedence over XDG.
+        // Do not let an inherited override select the caller's installation.
+        (
+            OsString::from("FLATPAK_USER_DIR"),
+            workspace.join("data/flatpak").into_os_string(),
+        ),
         (
             OsString::from("XDG_DATA_HOME"),
             workspace.join("data").into_os_string(),
@@ -237,7 +244,7 @@ fn isolated_flatpak_env(workspace: &Path) -> anyhow::Result<Vec<(OsString, OsStr
 fn write_weston_config(workspace: &Path) -> anyhow::Result<()> {
     fs::write(
         workspace.join("config/weston.ini"),
-        "[core]\nidle-time=0\nrenderer=pixman\n\n[shell]\nlocking=false\npanel-position=none\nbackground-color=0xff202020\n",
+        "[core]\nidle-time=0\nrenderer=pixman\n\n[shell]\nlocking=false\npanel-position=none\nbackground-color=0xff202020\nstartup-animation=none\n",
     )
     .context("writing weston config")?;
     Ok(())
@@ -381,6 +388,12 @@ mod tests {
         let env = isolated_flatpak_env(temp.path()).unwrap();
         assert!(
             env.iter()
+                .any(|(key, value)| key == "HOME" && value == temp.path().as_os_str())
+        );
+        assert!(env.iter().any(|(key, value)| key == "FLATPAK_USER_DIR"
+            && value == temp.path().join("data/flatpak").as_os_str()));
+        assert!(
+            env.iter()
                 .any(|(key, value)| key == "XDG_DATA_HOME"
                     && value.to_string_lossy().contains("data"))
         );
@@ -401,5 +414,27 @@ mod tests {
                 & 0o777,
             0o700
         );
+    }
+
+    #[test]
+    fn smoke_runs_do_not_reuse_or_modify_the_callers_app_profile() {
+        let caller = tempfile::tempdir().unwrap();
+        let relative = ".var/app/org.example.Test/config/marker";
+        let marker = caller.path().join(relative);
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, "caller data").unwrap();
+        for _ in 0..2 {
+            let workspace = tempfile::tempdir().unwrap();
+            let env = isolated_flatpak_env(workspace.path()).unwrap();
+            let mut command = std::process::Command::new("sh");
+            command.env("HOME", caller.path()).envs(env);
+            let status = command.args(["-c", "test ! -e \"$HOME/.var/app/org.example.Test/config/marker\" && mkdir -p \"$HOME/.var/app/org.example.Test/config\" && printf test > \"$HOME/.var/app/org.example.Test/config/marker\""]).status().unwrap();
+            assert!(status.success());
+            assert_eq!(
+                fs::read_to_string(workspace.path().join(relative)).unwrap(),
+                "test"
+            );
+            assert_eq!(fs::read_to_string(&marker).unwrap(), "caller data");
+        }
     }
 }

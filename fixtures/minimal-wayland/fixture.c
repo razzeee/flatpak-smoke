@@ -8,6 +8,12 @@ static gboolean present_window(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
+static gboolean reveal_content(gpointer user_data) {
+    gtk_widget_set_visible(GTK_WIDGET(user_data), TRUE);
+    g_print("fixture: content revealed\n");
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean crash(gpointer user_data) {
     (void)user_data;
     _exit(42);
@@ -36,6 +42,11 @@ static gboolean animate(gpointer user_data) {
 }
 
 static void clicked(GtkButton *button, gpointer user_data) {
+    if (g_strcmp0(mode, "blank-after-click") == 0) {
+        gtk_window_set_child(GTK_WINDOW(gtk_widget_get_root(GTK_WIDGET(button))), NULL);
+        g_print("fixture: client blanked\n");
+        return;
+    }
     if (g_strcmp0(mode, "exit-after-click") == 0) {
         g_print("fixture: exiting after click\n");
         _exit(43);
@@ -65,6 +76,13 @@ static void activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(box), button);
     gtk_window_set_child(GTK_WINDOW(window), box);
 
+    if (g_strcmp0(mode, "blank-client") == 0 || g_strcmp0(mode, "delayed-content") == 0) {
+        gtk_widget_set_visible(box, FALSE);
+        if (g_strcmp0(mode, "delayed-content") == 0) {
+            g_timeout_add(1500, reveal_content, box);
+        }
+    }
+
     if (g_strcmp0(mode, "animated") == 0) {
         GtkWidget *progress = gtk_progress_bar_new();
         gtk_widget_set_size_request(progress, 300, -1);
@@ -84,7 +102,7 @@ static void activate(GtkApplication *app, gpointer user_data) {
 int main(int argc, char **argv) {
     g_setenv("GDK_BACKEND", "wayland", TRUE);
     mode = g_getenv("FLATPAK_SMOKE_FIXTURE_MODE");
-    const char *modes[] = {"normal", "delayed", "never-draw", "crash-after-frame", "animated", "exit-after-click"};
+    const char *modes[] = {"normal", "delayed", "never-draw", "crash-after-frame", "animated", "exit-after-click", "blank-client", "blank-after-click", "delayed-content"};
     gboolean valid = mode == NULL;
     for (size_t i = 0; i < G_N_ELEMENTS(modes); i++) {
         valid |= g_strcmp0(mode, modes[i]) == 0;
@@ -94,6 +112,20 @@ int main(int argc, char **argv) {
         return 2;
     }
     g_print("fixture mode: %s\n", mode ? mode : "normal");
+
+    if (g_getenv("FLATPAK_SMOKE_FIXTURE_CHECK_PROFILE")) {
+        g_autofree char *marker = g_build_filename(g_get_user_config_dir(), "smoke-fixture-marker", NULL);
+        if (g_file_test(marker, G_FILE_TEST_EXISTS)) {
+            g_printerr("fixture: reused application profile\n");
+            return 44;
+        }
+        if (g_mkdir_with_parents(g_get_user_config_dir(), 0700) != 0 ||
+            !g_file_set_contents(marker, "fixture data", -1, NULL)) {
+            g_printerr("fixture: could not write profile marker\n");
+            return 45;
+        }
+        g_print("fixture: fresh application profile\n");
+    }
 
     GtkApplication *app = gtk_application_new(
         "org.example.FlatpakSmokeFixture",
