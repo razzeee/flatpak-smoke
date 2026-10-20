@@ -129,10 +129,16 @@ where
             bail!("verification failed: {message}");
         }
     };
+    let (installed_app, runtimes) = installer.phase_refs(&app_ref);
+    let phase_metadata = crate::result::PhaseMetadata {
+        app: Some(installed_app),
+        runtimes,
+        recipe: None,
+    };
     let install_ms = install_started.elapsed().as_millis();
 
     if started.elapsed() >= common.overall_timeout {
-        let result = RunResult::failed(
+        let mut result = RunResult::failed(
             Some(app_ref),
             artifact,
             Timings {
@@ -144,6 +150,7 @@ where
             FailureReason::InternalError,
             "overall timeout elapsed before app launch".to_string(),
         );
+        result.phase_metadata = phase_metadata;
         layout.write_result(&result)?;
         bail!("verification failed: overall timeout elapsed before app launch");
     }
@@ -164,7 +171,7 @@ where
 
     match session_result {
         Ok(success) => {
-            let result = RunResult::passed(
+            let mut result = RunResult::passed(
                 app_ref,
                 artifact,
                 Timings {
@@ -174,6 +181,7 @@ where
                 },
                 success.screenshot_paths,
             );
+            result.phase_metadata = phase_metadata;
             layout.write_result(&result)?;
             Ok(())
         }
@@ -181,7 +189,7 @@ where
             let screenshots = error.screenshots;
             let reason = error.reason;
             let message = error.message;
-            let result = RunResult::failed(
+            let mut result = RunResult::failed(
                 Some(app_ref),
                 artifact,
                 Timings {
@@ -193,6 +201,7 @@ where
                 reason,
                 message.clone(),
             );
+            result.phase_metadata = phase_metadata;
             layout.write_result(&result)?;
             bail!("verification failed: {message}");
         }

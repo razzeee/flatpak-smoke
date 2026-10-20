@@ -2,7 +2,10 @@ use std::{ffi::OsString, path::Path, time::Instant};
 
 use anyhow::bail;
 
-use crate::{command::CommandRunner, result::FailureReason};
+use crate::{
+    command::CommandRunner,
+    result::{FailureReason, InstalledRef},
+};
 
 pub struct ArtifactInstaller<'a> {
     runner: &'a CommandRunner,
@@ -77,6 +80,49 @@ impl<'a> ArtifactInstaller<'a> {
                 .collect())
         } else {
             bail!("flatpak list failed: {}", output.stderr.trim())
+        }
+    }
+
+    /// Snapshot the app and runtime refs visible in this phase's private installation.
+    /// A failed commit lookup is represented as `None`, not silently omitted.
+    pub fn phase_refs(&self, app_ref: &str) -> (InstalledRef, Option<Vec<InstalledRef>>) {
+        let app = self.installed_ref(app_ref);
+        let runtimes = self
+            .runner
+            .run(
+                "flatpak",
+                ["list", "--user", "--runtime", "--all", "--columns=ref"],
+                self.deadline,
+            )
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                output
+                    .stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(|reference| self.installed_ref(reference))
+                    .collect()
+            });
+        (app, runtimes)
+    }
+
+    fn installed_ref(&self, reference: &str) -> InstalledRef {
+        let commit = self
+            .runner
+            .run(
+                "flatpak",
+                ["info", "--user", "--show-commit", reference],
+                self.deadline,
+            )
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| output.stdout.trim().to_owned())
+            .filter(|commit| !commit.is_empty());
+        InstalledRef {
+            reference: reference.to_owned(),
+            commit,
         }
     }
 

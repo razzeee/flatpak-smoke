@@ -1,6 +1,6 @@
 use anyhow::{Context, bail, ensure};
 use serde::Deserialize;
-use std::{collections::HashSet, fs, path::Path, time::Duration};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,9 +166,9 @@ fn english() -> String {
 }
 
 impl Recipe {
-    pub fn read(path: &Path) -> anyhow::Result<Self> {
-        let text = fs::read_to_string(path).context("reading screenshot recipe")?;
-        let recipe: Self = serde_yaml_ng::from_str(&text).context("parsing screenshot recipe")?;
+    pub fn parse(contents: &[u8]) -> anyhow::Result<Self> {
+        let text = std::str::from_utf8(contents).context("screenshot recipe is not UTF-8")?;
+        let recipe: Self = serde_yaml_ng::from_str(text).context("parsing screenshot recipe")?;
         ensure!(
             recipe.version == 1,
             "unsupported recipe version {}",
@@ -298,4 +298,18 @@ fn key_values(chord: &str) -> anyhow::Result<Vec<u32>> {
     };
     values.push(value);
     Ok(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Recipe;
+
+    #[test]
+    fn parses_recipe_from_the_exact_byte_buffer() {
+        let contents =
+            b"version: 1\nsteps:\n  - capture:\n      name: home\n      caption: Home screen\n";
+        let recipe = Recipe::parse(contents).unwrap();
+        assert_eq!(recipe.version, 1);
+        assert!(Recipe::parse(b"\xff").is_err());
+    }
 }

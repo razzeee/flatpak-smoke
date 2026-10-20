@@ -162,6 +162,13 @@ flatpak-smoke-output/
   "schema_version": 1,
   "status": "passed",
   "app_ref": "app/org.example.App/x86_64/stable",
+  "phase_metadata": {
+    "app": { "ref": "app/org.example.App/x86_64/stable", "commit": "0123456789abcdef" },
+    "runtimes": [
+      { "ref": "runtime/org.freedesktop.Platform/x86_64/24.08", "commit": "abcdef0123456789" }
+    ],
+    "recipe": null
+  },
   "artifact": {
     "kind": "bundle",
     "path": "./build/org.example.App.flatpak"
@@ -177,6 +184,22 @@ flatpak-smoke-output/
   "failure": null
 }
 ```
+
+`phase_metadata` is an additive part of `result.json` (schema version 1). It
+reports what the verifier or screenshot runner found in its own private Flatpak
+installation after installation: `app` is the installed app, and `runtimes` is
+the list of installed runtime refs. Each entry has a Flatpak `ref` and a
+`commit`; the commit is `null` when Flatpak could not report it. `runtimes` is
+`null` when Flatpak could not enumerate them, and an empty array when the query
+succeeded but found none. On failures before installation, app and recipe
+metadata remain `null` and runtimes is `null`. Screenshot recipe metadata is
+hashed before dependency installation, so it can be populated even when a later
+dependency check fails; only app metadata remains `null` before installation.
+For screenshot runs,
+`recipe.content_hash` is the `md5:`-prefixed
+MD5 of the exact recipe file bytes; it is `null` when recipe content cannot be
+read. Verification runs have `recipe: null`. These fields supplement, rather
+than replace, `app_ref` and `screenshots.json` metadata.
 
 On failure, `status` is `failed` and `failure` contains a machine-readable reason plus a human-readable message.
 
