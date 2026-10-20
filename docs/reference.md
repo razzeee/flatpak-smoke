@@ -203,6 +203,11 @@ remaining stage and overall timeout budgets. Receiving partial VNC data does not
 restart the deadline. Cleanup can extend the run slightly beyond its timeout:
 each owned process group gets up to 200ms to stop before forced termination.
 
+Verification OCR, like recipe OCR, sets `OMP_THREAD_LIMIT=1` for Tesseract only,
+overriding inherited values to avoid worker-pool contention with software-rendered
+desktops. This does not extend either deadline or make OCR failures optional.
+See [the VSCodium OCR investigation](verification-ocr.md) for replay instructions.
+
 `SIGINT` and `SIGTERM` cancel the run through the normal failure path. The runner
 cleans up its app, compositor, and helper process groups, including background
 children whose parent has already exited. The private D-Bus session remains alive
