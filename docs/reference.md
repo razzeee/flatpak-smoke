@@ -192,7 +192,10 @@ the list of installed runtime refs. Each entry has a Flatpak `ref` and a
 `commit`; the commit is `null` when Flatpak could not report it. `runtimes` is
 `null` when Flatpak could not enumerate them, and an empty array when the query
 succeeded but found none. On failures before installation, app and recipe
-metadata remain `null` and runtimes is `null`. For screenshot runs,
+metadata remain `null` and runtimes is `null`. Screenshot recipe metadata is
+hashed before dependency installation, so it can be populated even when a later
+dependency check fails; only app metadata remains `null` before installation.
+For screenshot runs,
 `recipe.content_hash` is the `md5:`-prefixed
 MD5 of the exact recipe file bytes; it is `null` when recipe content cannot be
 read. Verification runs have `recipe: null`. These fields supplement, rather

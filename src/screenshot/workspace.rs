@@ -157,7 +157,7 @@ launch:
   args: ["--open", "${APP_DATA}/example project/nested/document.txt", "${APP_CONFIG}/settings.ini", "$(literal)"]
 steps: [{capture: {name: main, caption: Sample content}}]
 "#).unwrap();
-        let recipe = Recipe::read(&path).unwrap();
+        let recipe = Recipe::parse(&fs::read(&path).unwrap()).unwrap();
         let app = AppRef::parse("app/org.example.Test/x86_64/stable").unwrap();
         for _ in 0..2 {
             let workspace = Workspace::prepare().unwrap();
@@ -221,7 +221,7 @@ steps: [{capture: {name: main, caption: Sample content}}]
         ] {
             let entry = format!("    - {{source: {source}, destination: data/file}}\n");
             fs::write(&path, format!("version: 1\nsetup:\n  files:\n{entry}{}steps: [{{capture: {{name: main, caption: Main view}}}}]\n", if duplicate { &entry } else { "" })).unwrap();
-            let recipe = Recipe::read(&path).unwrap();
+            let recipe = Recipe::parse(&fs::read(&path).unwrap()).unwrap();
             let workspace = Workspace::prepare().unwrap();
             let deadline = Instant::now()
                 + if expired {

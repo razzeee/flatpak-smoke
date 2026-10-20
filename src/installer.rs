@@ -91,7 +91,7 @@ impl<'a> ArtifactInstaller<'a> {
             .runner
             .run(
                 "flatpak",
-                ["list", "--user", "--runtime", "--columns=ref"],
+                ["list", "--user", "--runtime", "--all", "--columns=ref"],
                 self.deadline,
             )
             .ok()

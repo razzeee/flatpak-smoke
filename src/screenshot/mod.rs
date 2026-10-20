@@ -62,7 +62,8 @@ pub fn repo(args: ScreenshotRepoArgs) -> anyhow::Result<()> {
 }
 
 fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
-    let recipe = recipe::Recipe::read(&common.recipe)?;
+    let recipe_contents = std::fs::read(&common.recipe).context("reading screenshot recipe")?;
+    let recipe = recipe::Recipe::parse(&recipe_contents)?;
     let (path, artifact) = match &source {
         Source::Bundle(path) => (path, Artifact::bundle(path)),
         Source::Repo(path, _) => (path, Artifact::repo(path)),
@@ -77,17 +78,15 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
     let mut manifest = manifest::Manifest::new();
     let mut timings = Timings::default();
     let mut phase_metadata = PhaseMetadata {
-        recipe: std::fs::read(&common.recipe)
-            .ok()
-            .map(|contents| RecipeMetadata {
-                content_hash: format!(
-                    "md5:{}",
-                    Md5::digest(contents)
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>()
-                ),
-            }),
+        recipe: Some(RecipeMetadata {
+            content_hash: format!(
+                "md5:{}",
+                Md5::digest(&recipe_contents)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
+        }),
         ..PhaseMetadata::default()
     };
     let outcome = (|| {
