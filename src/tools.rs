@@ -17,6 +17,8 @@ pub const REQUIRED_TOOLS: &[&str] = &[
     "identify",
 ];
 
+pub const XWAYLAND_TOOLS: &[&str] = &["Xwayland", "xdpyinfo"];
+
 const REQUIRED_PATHS: &[RequiredPath] = &[
     RequiredPath::executable("xdg-desktop-portal", "/usr/libexec/xdg-desktop-portal"),
     RequiredPath::executable(
@@ -31,7 +33,8 @@ const REQUIRED_PATHS: &[RequiredPath] = &[
 ];
 
 pub fn doctor() -> anyhow::Result<()> {
-    let missing = missing_requirements();
+    let mut missing = missing_requirements();
+    missing.extend(missing_tools(XWAYLAND_TOOLS));
     if missing.is_empty() {
         println!("flatpak-smoke doctor: ok");
         return Ok(());

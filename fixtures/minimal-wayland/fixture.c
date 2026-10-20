@@ -100,7 +100,7 @@ static void activate(GtkApplication *app, gpointer user_data) {
 }
 
 int main(int argc, char **argv) {
-    g_setenv("GDK_BACKEND", "wayland", TRUE);
+    g_setenv("GDK_BACKEND", "wayland", FALSE);
     mode = g_getenv("FLATPAK_SMOKE_FIXTURE_MODE");
     const char *modes[] = {"normal", "delayed", "never-draw", "crash-after-frame", "animated", "exit-after-click", "blank-client", "blank-after-click", "delayed-content"};
     gboolean valid = mode == NULL;

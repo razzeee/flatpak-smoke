@@ -95,6 +95,8 @@ jobs:
         run: |
           flatpak-builder --force-clean --user --install-deps-from=flathub --repo=target/fixture-repo target/fixture-build fixtures/minimal-wayland/org.example.FlatpakSmokeFixture.yml
           flatpak build-bundle target/fixture-repo target/org.example.FlatpakSmokeFixture.flatpak org.example.FlatpakSmokeFixture
+          flatpak-builder --force-clean --user --install-deps-from=flathub --repo=target/x11-fixture-repo target/x11-fixture-build fixtures/minimal-x11/org.example.FlatpakSmokeX11Fixture.yml
+          flatpak build-bundle target/x11-fixture-repo target/org.example.FlatpakSmokeX11Fixture.flatpak org.example.FlatpakSmokeX11Fixture
 
       - name: Verify local fixture bundle
         uses: ./
@@ -183,6 +185,24 @@ jobs:
           path: |
             target/fixture-modes/**
             target/smoke-lifecycle/**
+
+      - name: Verify Xwayland compatibility, native Wayland, isolation and cleanup
+        run: |
+          docker run --rm --privileged --tmpfs /run \
+            -v "$PWD:/workspace" -w /workspace \
+            --entrypoint sh smoke-lifecycle-tests -c '
+              mkdir -p /run/dbus
+              dbus-daemon --system --fork --nopidfile
+              exec python3 tests/xwayland.py
+            '
+
+      - name: Upload Xwayland evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xwayland-outputs
+          if-no-files-found: warn
+          path: target/xwayland/**
 
   screenshot-end-to-end:
     name: Native screenshot recipes
