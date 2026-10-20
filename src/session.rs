@@ -1113,6 +1113,9 @@ impl Screenshotter {
     fn detect_app_error_text(&self, path: &Path) -> Result<Option<&'static str>, SessionError> {
         let output = self
             .command("tesseract")
+            // Match recipe OCR: worker pools compete with software rendering
+            // and can exhaust the shared stage budget on CPU-constrained runners.
+            .env("OMP_THREAD_LIMIT", "1")
             .arg(path)
             .arg("stdout")
             .args(["--psm", "6"])
@@ -1155,6 +1158,7 @@ impl Screenshotter {
     ) -> Result<Option<(i32, i32)>, SessionError> {
         let output = self
             .command("tesseract")
+            .env("OMP_THREAD_LIMIT", "1")
             .arg(path)
             .arg("stdout")
             .args(["--psm", "6", "tsv"])
@@ -1299,6 +1303,7 @@ impl Screenshotter {
         let output = self
             .command("tesseract")
             .arg(&crop_path)
+            .env("OMP_THREAD_LIMIT", "1")
             .arg("stdout")
             .args(["--psm", "7"])
             .output_before_checked(self.deadline.get(), &self.health);
@@ -2505,28 +2510,138 @@ mod tests {
     }
 
     #[test]
-    fn hung_ocr_obeys_screenshot_deadline() {
+    fn verification_ocr_limits_threads_without_resetting_stage_budget() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        // Model CPU contention: an unrestricted worker pool cannot finish within
+        // the stage budget. Override even a caller-supplied OpenMP setting.
+        let helper = temp.path().join("tesseract");
+        fs::write(
+            &helper,
+            r#"#!/bin/sh
+[ "$OMP_THREAD_LIMIT" = 1 ] || exec /bin/sleep 30
+case "$*" in
+*tsv) printf 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n5\t1\t1\t1\t1\t1\t10\t20\t40\t20\t99\tContinue\n';;
+*'--psm 7') printf Continue;;
+*) printf 'fatal error';;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let convert = temp.path().join("convert");
+        fs::write(&convert, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&convert, fs::Permissions::from_mode(0o755)).unwrap();
+        let screenshotter = Screenshotter::new(
+            "unused",
+            vec![
+                (OsString::from("PATH"), temp.path().as_os_str().to_owned()),
+                (OsString::from("OMP_THREAD_LIMIT"), OsString::from("8")),
+            ],
+            temp.path().join("runner.log"),
+            Instant::now() + Duration::from_secs(30),
+        );
+        let stage_deadline = Instant::now() + Duration::from_secs(1);
+        screenshotter.deadline.set(stage_deadline);
+        let frame = temp.path().join("frame.png");
+        assert_eq!(
+            screenshotter.detect_app_error_text(&frame).unwrap(),
+            Some("fatal error")
+        );
+        assert_eq!(
+            screenshotter.find_text_center(&frame, "Continue").unwrap(),
+            Some((30, 30))
+        );
+        assert!(
+            screenshotter
+                .primary_action_button_matches_label(
+                    &frame,
+                    ComponentBox {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 40,
+                        area: 4000
+                    },
+                    "Continue",
+                )
+                .unwrap()
+        );
+        assert_eq!(screenshotter.deadline.get(), stage_deadline);
+        screenshotter.deadline.set(Instant::now());
+        let error = screenshotter.detect_app_error_text(&frame).unwrap_err();
+        assert_eq!(error.reason, FailureReason::ScreenshotFailed);
+        assert!(error.message.contains("deadline elapsed"));
+
+        screenshotter
+            .deadline
+            .set(Instant::now() + Duration::from_secs(1));
+        fs::write(
+            &helper,
+            "#!/bin/sh\nprintf 'OCR tool failed' >&2\nexit 42\n",
+        )
+        .unwrap();
+        let error = screenshotter.detect_app_error_text(&frame).unwrap_err();
+        assert_eq!(error.reason, FailureReason::ScreenshotFailed);
+        assert!(error.message.contains("OCR tool failed"));
+        fs::remove_file(&helper).unwrap();
+        let error = screenshotter.detect_app_error_text(&frame).unwrap_err();
+        assert_eq!(error.reason, FailureReason::DependencyFailed);
+    }
+
+    #[test]
+    #[ignore = "requires tesseract and FLATPAK_SMOKE_OCR_REPLAY pointing to the hosted screenshot"]
+    fn verification_ocr_replays_saved_screenshot() {
+        let frame = PathBuf::from(std::env::var_os("FLATPAK_SMOKE_OCR_REPLAY").unwrap());
+        assert!(frame.is_file());
+        let temp = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let screenshotter = Screenshotter::new(
+            "unused",
+            vec![],
+            temp.path().join("runner.log"),
+            started + Duration::from_secs(30),
+        );
+        // Installation/window detection have their own budgets. OCR must still
+        // finish within the remaining screenshot stage, not borrow overall time.
+        screenshotter
+            .deadline
+            .set(started + Duration::from_secs(10));
+        assert_eq!(screenshotter.detect_app_error_text(&frame).unwrap(), None);
+        eprintln!("saved screenshot OCR finished in {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn hung_ocr_obeys_stage_and_overall_deadlines() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let helper = temp.path().join("tesseract");
         fs::write(&helper, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-        let started = Instant::now();
-        let screenshotter = Screenshotter::new(
-            "unused",
-            vec![(OsString::from("PATH"), temp.path().as_os_str().to_owned())],
-            temp.path().join("runner.log"),
-            started + Duration::from_millis(150),
-        );
-        let error = screenshotter
-            .detect_app_error_text(&temp.path().join("frame.png"))
-            .unwrap_err();
-        assert!(
-            error.message.contains("deadline elapsed"),
-            "{}",
-            error.message
-        );
-        assert!(started.elapsed() < Duration::from_secs(2));
+        for overall_expires_first in [false, true] {
+            let started = Instant::now();
+            let overall =
+                started + Duration::from_millis(if overall_expires_first { 150 } else { 30_000 });
+            let screenshotter = Screenshotter::new(
+                "unused",
+                vec![(OsString::from("PATH"), temp.path().as_os_str().to_owned())],
+                temp.path().join("runner.log"),
+                overall,
+            );
+            screenshotter
+                .deadline
+                .set(overall.min(started + Duration::from_secs(1)));
+            let error = screenshotter
+                .detect_app_error_text(&temp.path().join("frame.png"))
+                .unwrap_err();
+            assert_eq!(error.reason, FailureReason::ScreenshotFailed);
+            assert!(
+                error.message.contains("deadline elapsed"),
+                "{}",
+                error.message
+            );
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
     }
 
     #[test]
