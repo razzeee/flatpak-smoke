@@ -90,8 +90,8 @@ with both fixture bundles built and their runtimes installed system-wide:
 python3 tests/xwayland.py --binary /usr/local/bin/flatpak-smoke
 ```
 
-CI builds both manifests and mounts its already-downloaded fixture runtimes
-read-only. Local fixtures were compiled from the same C source against the host's
+CI builds both manifests and installs GNOME Platform 49 in the e2e image's own
+system installation. Local fixtures were compiled from the same C source against the host's
 installed GTK and packaged with available GNOME Platform 51; CI uses the manifests'
 GNOME Platform 49. This difference must not be mistaken for hosted validation.
 
@@ -117,8 +117,27 @@ the production release binary and runtime plus Python for tests. As UID 1000,
 passed using that image's release binary. Artifacts are in
 `target/xwayland-container/` and `target/vlc-xwayland-container/`.
 
-No hosted workflow has been dispatched for these changes. Docker daemon access
-and hosted GNOME 49 fixture validation remain unverified locally; the source
-container build and execution were validated with rootless Podman. No release was
+The source container build and execution were validated with rootless Podman;
+Docker daemon access remains denied locally. Hosted PR validation is described
+below; no manual workflow dispatch was used. No release was
 published and no downstream runner pin was changed. OCR deadline handling on
 `fix/verification-ocr-deadline` is outside this change.
+
+## Hosted CI follow-up
+
+PR #27's first hosted run, `39408151263`, passed Cargo checks, the existing smoke
+fixtures/lifecycle tests and native screenshot recipes. The added display suite
+failed before its first Wayland app started: `bwrap: Can't find source path
+/proc/self/fd/16: Permission denied`. That suite uniquely remapped the runner's
+user Flatpak installation as `/var/lib/flatpak` inside a rootful container. A local
+rootless Podman probe of a user-runtime mount did not reproduce the failure.
+
+The e2e image now installs its own system GNOME Platform 49 runtime, matching the
+existing screenshot test image's provisioning pattern; CI no longer remaps a host
+user installation as a system installation. This is a test-environment correction,
+not an app-failure retry or a change to production display selection. The corrected
+image (`88044127c1ca68b4c5cfe074a1e7fcd9153e6bc991580e0bd546afd37cbf3f08`)
+built locally. All seven cases passed as root without a host runtime mount, using
+the image's system GNOME Platform 49 and locally compiled fixtures packaged for
+that runtime; artifacts are in `target/xwayland-system-gnome49/`. Hosted
+revalidation is still needed to confirm the rootful Docker correction.

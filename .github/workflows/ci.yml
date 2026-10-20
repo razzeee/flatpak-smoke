@@ -190,7 +190,6 @@ jobs:
         run: |
           docker run --rm --privileged --tmpfs /run \
             -v "$PWD:/workspace" -w /workspace \
-            -v "$HOME/.local/share/flatpak:/var/lib/flatpak:ro" \
             --entrypoint sh smoke-lifecycle-tests -c '
               mkdir -p /run/dbus
               dbus-daemon --system --fork --nopidfile

@@ -29,5 +29,9 @@ FROM runtime AS e2e-tests
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 \
   && rm -rf /var/lib/apt/lists/*
+# Install runtimes as a real container system installation, rather than treating
+# a host user installation as one through a read-only bind mount.
+RUN flatpak remote-add --system flathub https://flathub.org/repo/flathub.flatpakrepo \
+  && flatpak install --system --noninteractive flathub org.gnome.Platform//49
 
 FROM runtime AS final
