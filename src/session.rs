@@ -67,6 +67,20 @@ impl<'a> SessionRunner<'a> {
         screenshot_name: &str,
         screenshots_after_click: &[String],
     ) -> Result<SessionSuccess, SessionError> {
+        let backend = self.app_backend(app_ref)?;
+        self.layout
+            .append_runner_log(format!("selected app display backend: {backend:?}"))
+            .map_err(SessionError::internal)?;
+        if backend == AppBackend::Xwayland {
+            let missing = crate::tools::missing_tools(crate::tools::XWAYLAND_TOOLS);
+            if !missing.is_empty() {
+                return Err(SessionError::new(
+                    FailureReason::DependencyFailed,
+                    format!("X11 compatibility requires: {}", missing.join(", ")),
+                ));
+            }
+            ensure_x11_socket_directory().map_err(SessionError::internal)?;
+        }
         let display = WAYLAND_DISPLAY.to_string();
         let vnc_port_lease = VncPortLease::acquire()?;
         let vnc_port = vnc_port_lease.port();
@@ -76,16 +90,23 @@ impl<'a> SessionRunner<'a> {
             ))
             .map_err(SessionError::internal)?;
 
-        let (weston, session_client) = self.start_weston(&display, vnc_port)?;
+        let (weston, session_client) = self.start_weston(&display, vnc_port, backend)?;
         let weston = Rc::new(RefCell::new(weston));
-        let session_result = self.run_app_session(
-            app_ref,
-            screenshot_name,
-            screenshots_after_click,
-            &display,
-            session_client,
-            weston.clone(),
-        );
+        let session_result = (|| {
+            let x11_display = if backend == AppBackend::Xwayland {
+                Some(self.wait_for_xwayland(&display, weston.clone())?)
+            } else {
+                None
+            };
+            self.run_app_session(
+                app_ref,
+                screenshot_name,
+                screenshots_after_click,
+                (&display, x11_display.as_deref()),
+                session_client,
+                weston.clone(),
+            )
+        })();
         let compositor = SessionProcesses {
             weston: weston.clone(),
             app: None,
@@ -114,10 +135,11 @@ impl<'a> SessionRunner<'a> {
         app_ref: &str,
         screenshot_name: &str,
         screenshots_after_click: &[String],
-        display: &str,
+        displays: (&str, Option<&str>),
         mut session_client: VncClient,
         weston: Rc<RefCell<Child>>,
     ) -> Result<SessionSuccess, SessionError> {
+        let (display, x11_display) = displays;
         let launch_started = Instant::now();
         let mut processes = SessionProcesses { weston, app: None };
         let mut screenshotter = Screenshotter::new(
@@ -180,7 +202,12 @@ impl<'a> SessionRunner<'a> {
             })?)
             .join("app-launcher-finished");
         let app = Rc::new(AppProcess {
-            launcher: RefCell::new(self.spawn_app(app_ref, display, &launcher_finished)?),
+            launcher: RefCell::new(self.spawn_app(
+                app_ref,
+                display,
+                &launcher_finished,
+                x11_display,
+            )?),
             launcher_finished: Some(launcher_finished),
             app_id: flatpak_run_target(app_ref)
                 .split('/')
@@ -388,11 +415,12 @@ impl<'a> SessionRunner<'a> {
         &self,
         display: &str,
         vnc_port: u16,
+        app_backend: AppBackend,
     ) -> Result<(Child, VncClient), SessionError> {
         let mut last_error = None;
         for backend in ["vnc", "vnc-backend.so"] {
             remaining(self.overall_deadline).map_err(SessionError::internal)?;
-            let mut weston = self.spawn_weston(display, backend, vnc_port)?;
+            let mut weston = self.spawn_weston(display, backend, vnc_port, app_backend)?;
             match self.wait_for_compositor(display, vnc_port, &mut weston) {
                 Ok(client) => return Ok((weston, client)),
                 Err(error) => {
@@ -412,6 +440,7 @@ impl<'a> SessionRunner<'a> {
         display: &str,
         backend: &str,
         vnc_port: u16,
+        app_backend: AppBackend,
     ) -> Result<Child, SessionError> {
         let stdout = File::create(self.layout.logs_dir.join("weston.stdout.log"))
             .map_err(SessionError::internal)?;
@@ -422,6 +451,11 @@ impl<'a> SessionRunner<'a> {
             .arg(format!("--socket={display}"))
             .arg("--address=127.0.0.1")
             .arg(format!("--port={vnc_port}"))
+            .args(if app_backend == AppBackend::Xwayland {
+                vec!["--xwayland"]
+            } else {
+                vec![]
+            })
             .args([
                 "--width=1280",
                 "--height=720",
@@ -594,12 +628,19 @@ impl<'a> SessionRunner<'a> {
         app_ref: &str,
         display: &str,
         launcher_finished: &Path,
+        x11_display: Option<&str>,
     ) -> Result<Child, SessionError> {
         let stdout = File::create(&self.layout.app_stdout).map_err(SessionError::internal)?;
         let stderr = File::create(&self.layout.app_stderr).map_err(SessionError::internal)?;
         let run_target = flatpak_run_target(app_ref);
 
-        self.base_command("dbus-run-session", display)
+        let mut command = self.base_command("dbus-run-session", display);
+        if let Some(x11_display) = x11_display {
+            // Flatpak maps the compositor's socket into its sandbox; do not
+            // override DISPLAY with --env and bypass Flatpak's socket handling.
+            command.env("DISPLAY", x11_display);
+        }
+        command
             .args([
                 "--",
                 "sh",
@@ -608,17 +649,7 @@ impl<'a> SessionRunner<'a> {
                 "flatpak-smoke-session",
             ])
             .arg(launcher_finished)
-            .args([
-                "--env=GDK_BACKEND=wayland",
-                "--env=QT_QPA_PLATFORM=wayland",
-                "--env=SDL_VIDEODRIVER=wayland",
-                "--env=CLUTTER_BACKEND=wayland",
-                "--env=MOZ_ENABLE_WAYLAND=1",
-                "--env=XDG_SESSION_TYPE=wayland",
-                "--env=GSK_RENDERER=cairo",
-                "--env=GTK_A11Y=none",
-                "--env=LIBGL_ALWAYS_SOFTWARE=1",
-            ])
+            .args(app_display_args(x11_display))
             .arg(&run_target)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -633,18 +664,178 @@ impl<'a> SessionRunner<'a> {
 
     fn base_command(&self, program: &str, display: &str) -> std::process::Command {
         let mut command = std::process::Command::new(program);
+        command.envs(self.env.iter().cloned());
         command.env_remove("DISPLAY");
         command.env_remove("WAYLAND_DISPLAY");
+        command.env_remove("XAUTHORITY");
         command.env("WAYLAND_DISPLAY", display);
         command.env("XDG_SESSION_TYPE", "wayland");
-        for (key, value) in &self.env {
-            command.env(key, value);
-        }
         command
+    }
+
+    fn app_backend(&self, app_ref: &str) -> Result<AppBackend, SessionError> {
+        let output = std::process::Command::new("flatpak")
+            .envs(self.env.iter().cloned())
+            .args([
+                "info",
+                "--user",
+                "--show-permissions",
+                &flatpak_run_target(app_ref),
+            ])
+            .output_before_checked(self.overall_deadline, &HealthCheck::default())
+            .map_err(SessionError::internal)?;
+        if !output.status.success() {
+            return Err(SessionError::new(
+                FailureReason::LaunchFailed,
+                format!(
+                    "reading effective app display permissions: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            ));
+        }
+        Ok(AppBackend::from_permissions(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+
+    fn wait_for_xwayland(
+        &self,
+        display: &str,
+        weston: Rc<RefCell<Child>>,
+    ) -> Result<String, SessionError> {
+        let deadline = self
+            .overall_deadline
+            .min(Instant::now() + self.display_timeout);
+        let health = SessionProcesses {
+            weston: weston.clone(),
+            app: None,
+        }
+        .health_check();
+        loop {
+            health.check(deadline).map_err(SessionError::internal)?;
+            remaining(deadline).map_err(|error| {
+                SessionError::new(
+                    FailureReason::DisplayStartFailed,
+                    format!("waiting for Weston's Xwayland display: {error}"),
+                )
+            })?;
+            let log = fs::read_to_string(self.layout.logs_dir.join("weston.stderr.log"))
+                .map_err(SessionError::internal)?;
+            if let Some(x11_display) = weston_x11_display(&log) {
+                // Only accept the display reserved by this compositor, never an
+                // inherited desktop display or another concurrent smoke run.
+                let lock = fs::read_to_string(format!("/tmp/.X{}-lock", &x11_display[1..]))
+                    .map_err(SessionError::internal)?;
+                if lock.trim().parse::<u32>().ok() != Some(weston.borrow().id()) {
+                    return Err(SessionError::new(
+                        FailureReason::DisplayStartFailed,
+                        "Xwayland display lock does not belong to this Weston",
+                    ));
+                }
+                // A socket alone is not readiness: Weston launches Xwayland
+                // lazily on the first connection. Require a successful X11 query.
+                let output = self
+                    .base_command("xdpyinfo", display)
+                    .env("DISPLAY", &x11_display)
+                    .output_before_checked(deadline, &health)
+                    .map_err(|error| {
+                        SessionError::new(
+                            FailureReason::DisplayStartFailed,
+                            format!("Xwayland readiness query failed: {error}"),
+                        )
+                    })?;
+                if !output.status.success() {
+                    return Err(SessionError::new(
+                        FailureReason::DisplayStartFailed,
+                        format!(
+                            "Xwayland readiness query failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                    ));
+                }
+                self.layout
+                    .append_runner_log(format!("Weston Xwayland display ready: {x11_display}"))
+                    .map_err(SessionError::internal)?;
+                return Ok(x11_display);
+            }
+            sleep_before_checked(Duration::from_millis(50), deadline, &health).map_err(
+                |error| SessionError::new(FailureReason::DisplayStartFailed, error.to_string()),
+            )?;
+        }
     }
 }
 
 const WAYLAND_DISPLAY: &str = "flatpak-smoke-wayland";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppBackend {
+    Wayland,
+    Xwayland,
+}
+
+impl AppBackend {
+    fn from_permissions(permissions: &str) -> Self {
+        let mut context = false;
+        for line in permissions.lines().map(str::trim) {
+            if line.starts_with('[') {
+                context = line == "[Context]";
+            } else if context && let Some(sockets) = line.strip_prefix("sockets=") {
+                let sockets: Vec<_> = sockets.split(';').map(str::trim).collect();
+                if !sockets.contains(&"wayland")
+                    && (sockets.contains(&"x11") || sockets.contains(&"fallback-x11"))
+                {
+                    return Self::Xwayland;
+                }
+            }
+        }
+        Self::Wayland
+    }
+}
+
+fn weston_x11_display(log: &str) -> Option<String> {
+    log.lines().find_map(|line| {
+        let (_, display) = line.split_once("xserver listening on display :")?;
+        let number = display.trim().parse::<u32>().ok()?;
+        Some(format!(":{number}"))
+    })
+}
+
+fn ensure_x11_socket_directory() -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = Path::new("/tmp/.X11-unix");
+    match fs::create_dir(path) {
+        Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o1777)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn app_display_args(x11_display: Option<&str>) -> Vec<&'static str> {
+    let mut args = if x11_display.is_some() {
+        vec![
+            "--env=GDK_BACKEND=x11",
+            "--env=QT_QPA_PLATFORM=xcb",
+            "--env=SDL_VIDEODRIVER=x11",
+            "--env=CLUTTER_BACKEND=x11",
+            "--env=MOZ_ENABLE_WAYLAND=0",
+        ]
+    } else {
+        vec![
+            "--env=GDK_BACKEND=wayland",
+            "--env=QT_QPA_PLATFORM=wayland",
+            "--env=SDL_VIDEODRIVER=wayland",
+            "--env=CLUTTER_BACKEND=wayland",
+            "--env=MOZ_ENABLE_WAYLAND=1",
+        ]
+    };
+    args.extend([
+        "--env=XDG_SESSION_TYPE=wayland",
+        "--env=GSK_RENDERER=cairo",
+        "--env=GTK_A11Y=none",
+        "--env=LIBGL_ALWAYS_SOFTWARE=1",
+    ]);
+    args
+}
 
 #[derive(Clone)]
 struct SessionProcesses {
@@ -2218,6 +2409,175 @@ fn flatpak_run_target(app_ref: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn xwayland_display_discovery_is_bounded_without_launching_an_app() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = OutputLayout::prepare(&temp.path().join("output"), false).unwrap();
+        fs::write(
+            layout.logs_dir.join("weston.stderr.log"),
+            "no Xwayland display\n",
+        )
+        .unwrap();
+        let runner = SessionRunner::new(
+            &layout,
+            vec![],
+            Duration::from_millis(40),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(5),
+        );
+        let started = Instant::now();
+        let error = runner
+            .wait_for_xwayland("unused", sleeping_process())
+            .unwrap_err();
+        assert_eq!(error.reason, FailureReason::DisplayStartFailed);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!layout.app_stdout.exists());
+    }
+
+    #[test]
+    fn display_selection_queries_effective_permissions_in_private_installation() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let layout = OutputLayout::prepare(&temp.path().join("output"), false).unwrap();
+        let flatpak = temp.path().join("flatpak");
+        fs::write(&flatpak, "#!/bin/sh\nprintf '%s\\n' \"$FLATPAK_USER_DIR\" \"$@\" > \"$HOME/query\"\nprintf '[Context]\\nsockets=x11;\\n'\n").unwrap();
+        fs::set_permissions(flatpak, fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = SessionRunner::new(
+            &layout,
+            vec![
+                ("PATH".into(), temp.path().as_os_str().to_owned()),
+                ("HOME".into(), temp.path().as_os_str().to_owned()),
+                (
+                    "FLATPAK_USER_DIR".into(),
+                    temp.path().join("private-installation").into_os_string(),
+                ),
+            ],
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert_eq!(
+            runner
+                .app_backend("app/org.example.Test/x86_64/stable")
+                .unwrap(),
+            AppBackend::Xwayland
+        );
+        let query = fs::read_to_string(temp.path().join("query")).unwrap();
+        assert_eq!(
+            query,
+            format!(
+                "{}\ninfo\n--user\n--show-permissions\norg.example.Test//stable\n",
+                temp.path().join("private-installation").display()
+            )
+        );
+    }
+
+    #[test]
+    fn display_selection_prefers_wayland_and_respects_effective_sockets() {
+        use super::AppBackend::{Wayland, Xwayland};
+        for (permissions, expected) in [
+            ("[Context]\nsockets=x11;pulseaudio;\n", Xwayland),
+            ("[Context]\nsockets=fallback-x11;\n", Xwayland),
+            ("[Context]\nsockets=wayland;x11;\n", Wayland),
+            ("[Context]\nsockets=wayland;fallback-x11;\n", Wayland),
+            ("[Context]\nsockets=wayland;\n", Wayland),
+            ("[Context]\nsockets=!wayland;x11;\n", Xwayland),
+            ("[Context]\nsockets=!x11;pulseaudio;\n", Wayland),
+            ("[Environment]\nsockets=x11;\n", Wayland),
+            ("[Context]\nsockets=not-x11;\n", Wayland),
+            ("", Wayland),
+        ] {
+            assert_eq!(
+                super::AppBackend::from_permissions(permissions),
+                expected,
+                "{permissions}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_only_a_local_display_from_owned_weston_log() {
+        assert_eq!(
+            super::weston_x11_display("[09:58:22.089] xserver listening on display :17\n"),
+            Some(":17".into())
+        );
+        for log in [
+            "DISPLAY=:0",
+            "xserver listening on display :host:0",
+            "xserver listening on display :0 trailing",
+            "xserver listening on display :-1",
+        ] {
+            assert_eq!(super::weston_x11_display(log), None);
+        }
+    }
+
+    #[test]
+    fn app_launch_propagates_only_owned_displays_and_matching_backends() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let layout = OutputLayout::prepare(&temp.path().join("output"), false).unwrap();
+        let helper = temp.path().join("dbus-run-session");
+        fs::write(&helper, "#!/bin/sh\nprintf '%s\\n' \"${DISPLAY-unset}\" \"$WAYLAND_DISPLAY\" \"${XAUTHORITY-unset}\" \"$@\"\n").unwrap();
+        fs::set_permissions(helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = SessionRunner::new(
+            &layout,
+            vec![
+                ("PATH".into(), temp.path().as_os_str().to_owned()),
+                ("DISPLAY".into(), ":999".into()),
+                ("WAYLAND_DISPLAY".into(), "caller-wayland".into()),
+                ("XAUTHORITY".into(), "/caller/auth".into()),
+            ],
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(5),
+        );
+        for display in [None, Some(":17")] {
+            let mut child = runner
+                .spawn_app(
+                    "app/org.example.Test/x86_64/stable",
+                    "owned-wayland",
+                    &temp.path().join("finished"),
+                    display,
+                )
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+            let output = fs::read_to_string(&layout.app_stdout).unwrap();
+            assert!(
+                output.starts_with(&format!(
+                    "{}\nowned-wayland\nunset\n",
+                    display.unwrap_or("unset")
+                )),
+                "{output}"
+            );
+            assert!(output.lines().any(|arg| arg == "org.example.Test//stable"));
+            assert!(output.lines().any(|arg| arg
+                == if display.is_some() {
+                    "--env=QT_QPA_PLATFORM=xcb"
+                } else {
+                    "--env=QT_QPA_PLATFORM=wayland"
+                }));
+        }
+    }
+
+    #[test]
+    fn xwayland_launch_does_not_force_unavailable_wayland_toolkits() {
+        let args = super::app_display_args(Some(":17"));
+        for arg in [
+            "--env=GDK_BACKEND=x11",
+            "--env=QT_QPA_PLATFORM=xcb",
+            "--env=SDL_VIDEODRIVER=x11",
+            "--env=CLUTTER_BACKEND=x11",
+            "--env=MOZ_ENABLE_WAYLAND=0",
+        ] {
+            assert!(args.contains(&arg), "missing {arg}: {args:?}");
+        }
+        assert!(args.contains(&"--env=XDG_SESSION_TYPE=wayland"));
+        assert!(!args.contains(&"--env=QT_QPA_PLATFORM=wayland"));
+    }
+
     use super::*;
     use std::thread;
 

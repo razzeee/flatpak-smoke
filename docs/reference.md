@@ -81,7 +81,7 @@ For each verification run, `flatpak-smoke`:
 3. Creates an isolated temporary home, Flatpak user installation, and XDG environment. App data starts fresh for each run, including when using the host CLI.
 4. Writes an `xdg-desktop-portal` config that prefers the GTK portal backend and GNOME Keyring for the Secret portal.
 5. Installs the bundle or repo ref.
-6. Starts a headless Weston Wayland compositor with a local VNC backend for screenshots and pointer input, then waits for its background to stop changing before launching the app.
+6. Reads effective Flatpak socket permissions and starts a headless Weston Wayland compositor with a local VNC backend for screenshots and pointer input. Apps without a Wayland socket but with `x11` or `fallback-x11` use Weston's Xwayland compatibility; other apps retain the Wayland launch path. It waits for the display and background before launching the app.
 7. Launches the app through `dbus-run-session` and `flatpak run`.
 8. Waits for visible app content to persist across at least three samples spanning at least 750ms. Each sample is compared with the compositor background to locate foreground regions; their interiors must contain visible detail. A blank sample restarts observation; animation is allowed.
 9. Captures screenshots and OCR-checks them for fatal error markers.
@@ -226,6 +226,7 @@ Normal verification requires:
 - `dbus-run-session`
 - `gnome-keyring-daemon`
 - `weston`
+- `Xwayland` and `xdpyinfo` (from `xwayland` and `x11-utils` on Debian), for X11-only apps
 - `tesseract`
 - `xdg-desktop-portal`
 - `xdg-desktop-portal-gtk`
@@ -238,6 +239,33 @@ Check the normal toolchain with:
 ```sh
 cargo run -- doctor
 ```
+
+### X11 compatibility in verification
+
+Verification remains a Wayland session (`XDG_SESSION_TYPE=wayland`), including
+for legacy X11 apps. If the installed app's effective permissions expose only
+X11, Weston starts its rootless Xwayland module. The verifier discovers the
+display from its own compositor log, verifies its lock belongs to that compositor,
+and requires a successful, deadline-bounded `xdpyinfo` query before app launch.
+Weston's lazy socket listener alone is not sufficient readiness.
+
+Only that display is passed to Flatpak, which exposes the socket according to the
+app's existing permissions. Inherited `DISPLAY` and `XAUTHORITY` are discarded;
+no extra socket permissions are granted. GTK, Qt, SDL, Clutter and Mozilla launch
+settings match the selected display. When Wayland is permitted it remains preferred;
+apps with no declared display sockets retain the previous Wayland launch behavior.
+
+Capture, OCR, clicking, visible-content checks and app-exit checks still use the
+same Weston/VNC workflow. There is no native X11 desktop/backend and no retry of
+an app after a launch, window, OCR or other arbitrary failure. A compatibility
+readiness failure fails before app launch. Weston allocates its X11 display and
+owns its socket/lock teardown; normal process-group cleanup also stops Xwayland.
+`doctor` checks both display capabilities, but native Wayland verification does
+not require the Xwayland-specific tools.
+
+This selection applies to `verify-bundle` / `verify-repo`, not the separate GNOME
+native-window screenshot recipe workflow. See [the VLC diagnosis](xwayland-diagnosis.md)
+for controlled evidence and regression coverage.
 
 ## Container Usage
 

@@ -16,6 +16,8 @@ RUN apt-get update \
     imagemagick \
     tesseract-ocr \
     weston \
+    xwayland \
+    x11-utils \
     xdg-desktop-portal \
     xdg-desktop-portal-gtk \
   && printf 'auth required pam_permit.so\naccount required pam_permit.so\n' > /etc/pam.d/weston-remote-access \

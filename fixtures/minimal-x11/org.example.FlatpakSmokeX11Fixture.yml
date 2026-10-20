@@ -1,0 +1,18 @@
+app-id: org.example.FlatpakSmokeX11Fixture
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: flatpak-smoke-fixture
+finish-args:
+  - --socket=x11
+  # The shared fixture source uses the original GtkApplication ID.
+  - --own-name=org.example.FlatpakSmokeFixture
+modules:
+  - name: flatpak-smoke-fixture
+    buildsystem: simple
+    build-commands:
+      - cc fixture.c -o flatpak-smoke-fixture $(pkg-config --cflags --libs gtk4)
+      - install -Dm755 flatpak-smoke-fixture /app/bin/flatpak-smoke-fixture
+    sources:
+      - type: file
+        path: ../minimal-wayland/fixture.c
