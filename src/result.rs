@@ -7,6 +7,7 @@ pub struct RunResult {
     pub schema_version: u8,
     pub status: RunStatus,
     pub app_ref: Option<String>,
+    pub phase_metadata: PhaseMetadata,
     pub artifact: Artifact,
     pub timings_ms: Timings,
     pub screenshots: Vec<String>,
@@ -24,6 +25,7 @@ impl RunResult {
             schema_version: 1,
             status: RunStatus::Passed,
             app_ref: Some(app_ref),
+            phase_metadata: PhaseMetadata::default(),
             artifact,
             timings_ms,
             screenshots,
@@ -43,6 +45,7 @@ impl RunResult {
             schema_version: 1,
             status: RunStatus::Failed,
             app_ref,
+            phase_metadata: PhaseMetadata::default(),
             artifact,
             timings_ms,
             screenshots,
@@ -56,6 +59,25 @@ impl RunResult {
     pub fn is_passed(&self) -> bool {
         self.status == RunStatus::Passed
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PhaseMetadata {
+    pub app: Option<InstalledRef>,
+    pub runtimes: Option<Vec<InstalledRef>>,
+    pub recipe: Option<RecipeMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstalledRef {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecipeMetadata {
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,5 +175,33 @@ mod tests {
         assert_eq!(value["status"], "passed");
         assert_eq!(value["artifact"]["kind"], "bundle");
         assert_eq!(value["failure"], serde_json::Value::Null);
+        assert!(value["phase_metadata"]["app"].is_null());
+        assert!(value["phase_metadata"]["runtimes"].is_null());
+        assert!(value["phase_metadata"]["recipe"].is_null());
+    }
+
+    #[test]
+    fn serializes_phase_metadata_and_preserves_missing_commit() {
+        let metadata = PhaseMetadata {
+            app: Some(InstalledRef {
+                reference: "app/org.example.App/x86_64/stable".into(),
+                commit: None,
+            }),
+            runtimes: Some(vec![InstalledRef {
+                reference: "runtime/org.freedesktop.Platform/x86_64/24.08".into(),
+                commit: Some("abc123".into()),
+            }]),
+            recipe: Some(RecipeMetadata {
+                content_hash: "md5:d41d8cd98f00b204e9800998ecf8427e".into(),
+            }),
+        };
+        let value = serde_json::to_value(metadata).unwrap();
+        assert!(value["app"]["commit"].is_null());
+        assert_eq!(value["app"]["ref"], "app/org.example.App/x86_64/stable");
+        assert_eq!(value["runtimes"][0]["commit"], "abc123");
+        assert_eq!(
+            value["recipe"]["content_hash"],
+            "md5:d41d8cd98f00b204e9800998ecf8427e"
+        );
     }
 }

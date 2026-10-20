@@ -13,12 +13,13 @@ use crate::{
     cli::{ScreenshotArgs, ScreenshotBundleArgs, ScreenshotRepoArgs},
     installer::ArtifactInstaller,
     output::OutputLayout,
-    result::{Artifact, FailureReason, RunResult, Timings},
+    result::{Artifact, FailureReason, PhaseMetadata, RecipeMetadata, RunResult, Timings},
     tools,
 };
 use anyhow::Context;
 use app_ref::AppRef;
 use desktop::Desktop;
+use md5::{Digest, Md5};
 use std::{
     path::PathBuf,
     rc::Rc,
@@ -75,6 +76,20 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
     let layout = OutputLayout::prepare(&common.output, common.force)?;
     let mut manifest = manifest::Manifest::new();
     let mut timings = Timings::default();
+    let mut phase_metadata = PhaseMetadata {
+        recipe: std::fs::read(&common.recipe)
+            .ok()
+            .map(|contents| RecipeMetadata {
+                content_hash: format!(
+                    "md5:{}",
+                    Md5::digest(contents)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                ),
+            }),
+        ..PhaseMetadata::default()
+    };
     let outcome = (|| {
         recipe.validate_setup()?;
         check_dependencies(workflow::bounded(deadline, Duration::from_secs(5)))
@@ -110,6 +125,9 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         })();
         timings.install = Some(install_started.elapsed().as_millis());
         let app_ref = installed?;
+        let (app, runtimes) = installer.phase_refs(&app_ref.to_string());
+        phase_metadata.app = Some(app);
+        phase_metadata.runtimes = runtimes;
         manifest.app_ref = Some(app_ref.to_string());
         let launch_args =
             workspace.prepare_app_data(&app_ref, &recipe, &common.recipe, deadline)?;
@@ -162,7 +180,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
     if outcome.is_err() && layout.logs_dir.join("last-candidate.png").is_file() {
         screenshots.push("logs/last-candidate.png".into());
     }
-    let result = match &outcome {
+    let mut result = match &outcome {
         Ok(()) => RunResult::passed(
             manifest.app_ref.clone().unwrap_or_default(),
             artifact,
@@ -181,6 +199,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
             format!("{error:#}"),
         ),
     };
+    result.phase_metadata = phase_metadata;
     manifest.write(&common.output.join("screenshots.json"))?;
     layout.write_result(&result)?;
     outcome
