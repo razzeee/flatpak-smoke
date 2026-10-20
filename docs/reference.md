@@ -382,7 +382,7 @@ on self-hosted runners. No Rust toolchain is required.
 Example using a local repository and longer timeouts:
 
 ```yaml
-- uses: razzeee/flatpak-smoke@v0.1.2
+- uses: razzeee/flatpak-smoke@v0.2.0
   id: capture
   with:
     mode: screenshots
@@ -418,7 +418,7 @@ privileged mode, tmpfs mounts, system bus, and artifact ownership.
 Each action release records its matching image release in `action/image-version`.
 It does not follow `latest`. Main-branch builds publish `sha-<full-commit-sha>`
 images after CI passes; `v*` tags publish the matching version after the same
-checks. The action currently targets `v0.1.2`.
+checks. The action currently targets `v0.2.0`.
 
 For immutable CI inputs, pin `uses: razzeee/flatpak-smoke@<full-action-commit-sha>`
 and set `image: ghcr.io/razzeee/flatpak-smoke-screenshots@sha256:<digest>` for
