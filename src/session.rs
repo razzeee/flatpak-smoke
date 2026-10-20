@@ -800,9 +800,12 @@ fn weston_x11_display(log: &str) -> Option<String> {
     })
 }
 
-fn ensure_x11_socket_directory() -> std::io::Result<()> {
+pub(crate) fn ensure_x11_socket_directory() -> std::io::Result<()> {
+    ensure_x11_socket_directory_at(Path::new("/tmp/.X11-unix"))
+}
+
+fn ensure_x11_socket_directory_at(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let path = Path::new("/tmp/.X11-unix");
     match fs::create_dir(path) {
         Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o1777)),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
@@ -2414,6 +2417,29 @@ fn flatpak_run_target(app_ref: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn x11_socket_directory_initialization_is_sticky_and_preserves_existing_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("x11");
+        ensure_x11_socket_directory_at(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o1777
+        );
+        fs::write(path.join("unrelated"), "caller data").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o1755)).unwrap();
+        ensure_x11_socket_directory_at(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o1755
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("unrelated")).unwrap(),
+            "caller data"
+        );
+    }
+
     #[test]
     fn xwayland_display_discovery_is_bounded_without_launching_an_app() {
         let temp = tempfile::tempdir().unwrap();

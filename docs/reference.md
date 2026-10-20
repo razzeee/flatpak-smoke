@@ -504,11 +504,21 @@ on a host with ImageMagick.
 
 ## Screenshot recipes
 
-`screenshot-bundle` and `screenshot-repo` capture Wayland app windows in an
+`screenshot-bundle` and `screenshot-repo` capture app windows in an
 isolated GNOME session. They include native decorations, shadows, rounded
 corners, and transparency. Listing images contain neither the desktop wallpaper
 nor the pointer. The tool saves native pixels without adding shadows or scaling
 the exported PNG.
+
+GNOME remains a Wayland compositor. X11-only apps use its authenticated Xwayland
+compatibility path, with the session's actual display and private Xauthority file
+passed through Flatpak's normal socket handling. The runner creates a missing
+`/tmp/.X11-unix` with mode 1777 before starting that path; existing directories
+are left unchanged and must already have correct ownership/permissions. Native
+Wayland sessions do not initialize Xwayland. Cleanup gives the owning Xwayland
+session up to one second to quit cooperatively before forced process-group cleanup.
+See [the v0.4.0 capture diagnosis](gnome-xwayland-capture.md) for the startup
+failure, reproduction and remaining VLC recipe limitations.
 
 ```sh
 flatpak-smoke screenshot-bundle ./org.example.App.flatpak \

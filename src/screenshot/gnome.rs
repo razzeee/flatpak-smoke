@@ -8,7 +8,7 @@ use crate::{
     output::OutputLayout,
     process::{BoundedCommand, HealthCheck, ManagedChild, remaining, sleep_before_checked},
     result::FailureReason,
-    session::AppBackend,
+    session::{AppBackend, ensure_x11_socket_directory},
 };
 use anyhow::{Context, ensure};
 use serde_json::{Value, json};
@@ -35,6 +35,49 @@ pub struct Gnome {
     app_id: String,
     version: String,
     helper_ready: Option<PathBuf>,
+    x11: Option<X11Connection>,
+}
+
+struct X11Connection {
+    display: String,
+    authority: PathBuf,
+}
+
+impl X11Connection {
+    fn from_helper(info: &Value, workspace: &Workspace) -> anyhow::Result<Self> {
+        let display = info["x11"]["display"]
+            .as_str()
+            .context("GNOME did not report its X11 display")?;
+        let number = display
+            .strip_prefix(':')
+            .context("GNOME reported a nonlocal X11 display")?;
+        ensure!(
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()),
+            "GNOME reported an invalid X11 display"
+        );
+        let authority = PathBuf::from(
+            info["x11"]["authority"]
+                .as_str()
+                .context("GNOME did not report its Xauthority file")?,
+        );
+        ensure!(
+            authority.is_file()
+                && authority
+                    .canonicalize()?
+                    .starts_with(workspace.home.join("runtime").canonicalize()?),
+            "GNOME Xauthority file is outside the private runtime directory"
+        );
+        Ok(Self {
+            display: display.to_string(),
+            authority,
+        })
+    }
+
+    fn apply(&self, command: &mut std::process::Command) {
+        command
+            .env("DISPLAY", &self.display)
+            .env("XAUTHORITY", &self.authority);
+    }
 }
 
 impl Gnome {
@@ -44,6 +87,11 @@ impl Gnome {
         backend: AppBackend,
         deadline: Instant,
     ) -> anyhow::Result<Self> {
+        if backend == AppBackend::Xwayland {
+            // Mutter reserves both public and service displays. Its first mkdir
+            // obeys umask; its second pass rejects the resulting non-1777 mode.
+            ensure_x11_socket_directory().context("preparing Xwayland socket directory")?;
+        }
         let extension = workspace
             .home
             .join("data/gnome-shell/extensions/capture@flatpak-smoke");
@@ -107,6 +155,7 @@ impl Gnome {
             app_id: String::new(),
             version: String::new(),
             helper_ready: None,
+            x11: None,
         };
         let mut last_error = String::new();
         loop {
@@ -128,17 +177,19 @@ impl Gnome {
                         desktop.helper_ready = Some(desktop.workspace.home.join("helper-ready"));
                         desktop.check(deadline)?;
                         if backend == AppBackend::Xwayland {
-                            let x11 = desktop
-                                .workspace
-                                .command("xdpyinfo")
-                                .args(["-display", ":0"])
+                            let connection = X11Connection::from_helper(&info, &desktop.workspace)?;
+                            let mut probe = desktop.workspace.command("xdpyinfo");
+                            connection.apply(&mut probe);
+                            let x11 = probe
                                 .output_before_checked(deadline, &desktop.health())
                                 .context("checking the GNOME Xwayland display")?;
                             ensure!(
                                 x11.status.success(),
-                                "GNOME Xwayland display :0 is not ready: {}",
+                                "GNOME Xwayland display {} is not ready: {}",
+                                connection.display,
                                 String::from_utf8_lossy(&x11.stderr).trim()
                             );
+                            desktop.x11 = Some(connection);
                         }
                         return Ok(desktop);
                     }
@@ -203,16 +254,19 @@ impl Gnome {
                 "--env=MOZ_ENABLE_WAYLAND=1",
             ],
             AppBackend::Xwayland => &[
-                "--env=DISPLAY=:0",
                 "--env=GDK_BACKEND=x11",
                 "--env=QT_QPA_PLATFORM=xcb",
                 "--env=SDL_VIDEODRIVER=x11",
                 "--env=MOZ_ENABLE_WAYLAND=0",
             ],
         };
-        let app = self
-            .workspace
-            .command("flatpak")
+        let mut command = self.workspace.command("flatpak");
+        if let Some(connection) = &self.x11 {
+            // Let Flatpak map the authenticated session socket into its sandbox.
+            // A sandbox --env=DISPLAY override alone cannot provide that socket.
+            connection.apply(&mut command);
+        }
+        let app = command
             .env("DBUS_SESSION_BUS_ADDRESS", &self.bus)
             .args(["run", "--user"])
             .arg(format!("--arch={}", app_ref.arch()))
@@ -426,6 +480,141 @@ impl Drop for Gnome {
         if let Some(keyring) = &mut self.keyring {
             keyring.terminate();
         }
+        if self.backend == AppBackend::Xwayland && self.helper_ready.is_some() {
+            // Killing the whole group at once can kill mandatory Xwayland before
+            // Mutter runs prepare-shutdown and removes its sockets/locks. Ask the
+            // owning compositor to quit first, then retain forced group cleanup.
+            // Like Flatpak instance cleanup, this must also run after cancellation.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            if let Ok(mut request) = self
+                .workspace
+                .command("python3")
+                .env("DBUS_SESSION_BUS_ADDRESS", &self.bus)
+                .arg(self.workspace.home.join("client.py"))
+                .arg(r#"{"action":"quit"}"#)
+                .arg("500")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn_managed()
+            {
+                while Instant::now() < deadline && matches!(request.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                while Instant::now() < deadline
+                    && matches!(self.shell.borrow_mut().try_wait(), Ok(None))
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
         self.shell.borrow_mut().terminate();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x11_connection_uses_reported_display_and_private_authority() {
+        let workspace = Workspace::prepare().unwrap();
+        let authority = workspace.home.join("runtime/test-Xauthority");
+        fs::write(&authority, b"test cookie").unwrap();
+        let info = json!({"x11": {"display": ":7", "authority": authority}});
+        let connection = X11Connection::from_helper(&info, &workspace).unwrap();
+        let mut command = workspace.command("unused");
+        connection.apply(&mut command);
+        let env: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            env[std::ffi::OsStr::new("DISPLAY")],
+            Some(std::ffi::OsStr::new(":7"))
+        );
+        assert_eq!(
+            env[std::ffi::OsStr::new("XAUTHORITY")],
+            Some(authority.as_os_str())
+        );
+    }
+
+    #[test]
+    fn x11_connection_rejects_missing_remote_and_foreign_credentials() {
+        let workspace = Workspace::prepare().unwrap();
+        let authority = workspace.home.join("runtime/test-Xauthority");
+        fs::write(&authority, b"test cookie").unwrap();
+        for display in ["", ":", ":0 trailing", "host:0", ":-1"] {
+            assert!(
+                X11Connection::from_helper(
+                    &json!({"x11": {"display": display, "authority": authority}}),
+                    &workspace
+                )
+                .is_err()
+            );
+        }
+        assert!(X11Connection::from_helper(&json!({}), &workspace).is_err());
+        let foreign = tempfile::NamedTempFile::new().unwrap();
+        assert!(
+            X11Connection::from_helper(
+                &json!({"x11": {"display": ":0", "authority": foreign.path()}}),
+                &workspace
+            )
+            .is_err()
+        );
+        let link = workspace.home.join("runtime/foreign-link");
+        std::os::unix::fs::symlink(foreign.path(), &link).unwrap();
+        assert!(
+            X11Connection::from_helper(
+                &json!({"x11": {"display": ":0", "authority": link}}),
+                &workspace
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires GNOME screenshot image, system bus and a headless container"]
+    fn xwayland_session_starts_with_authenticated_readiness() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = OutputLayout::prepare(&temp.path().join("output"), false).unwrap();
+        let workspace = Rc::new(Workspace::prepare().unwrap());
+        let desktop = Gnome::start(
+            workspace,
+            &layout,
+            AppBackend::Xwayland,
+            Instant::now() + Duration::from_secs(20),
+        );
+        if let Err(error) = &desktop {
+            eprintln!(
+                "{}",
+                fs::read_to_string(layout.logs_dir.join("desktop.stderr.log")).unwrap_or_default()
+            );
+            panic!("Xwayland capture startup failed: {error:#}");
+        }
+        let first = desktop.unwrap();
+        // A second compositor must discover its own display/cookie rather than
+        // connecting to the first session's :0 or inheriting caller credentials.
+        let second_workspace = Rc::new(Workspace::prepare().unwrap());
+        let second_layout =
+            OutputLayout::prepare(&temp.path().join("second-output"), false).unwrap();
+        let second = Gnome::start(
+            second_workspace,
+            &second_layout,
+            AppBackend::Xwayland,
+            Instant::now() + Duration::from_secs(20),
+        )
+        .unwrap();
+        assert_ne!(
+            first.x11.as_ref().unwrap().display,
+            second.x11.as_ref().unwrap().display
+        );
+        assert_ne!(
+            first.x11.as_ref().unwrap().authority,
+            second.x11.as_ref().unwrap().authority
+        );
+        first
+            .check(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        second
+            .check(Instant::now() + Duration::from_secs(1))
+            .unwrap();
     }
 }
