@@ -768,13 +768,13 @@ impl<'a> SessionRunner<'a> {
 const WAYLAND_DISPLAY: &str = "flatpak-smoke-wayland";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AppBackend {
+pub(crate) enum AppBackend {
     Wayland,
     Xwayland,
 }
 
 impl AppBackend {
-    fn from_permissions(permissions: &str) -> Self {
+    pub(crate) fn from_permissions(permissions: &str) -> Self {
         let mut context = false;
         for line in permissions.lines().map(str::trim) {
             if line.starts_with('[') {

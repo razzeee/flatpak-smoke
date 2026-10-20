@@ -8,6 +8,7 @@ use crate::{
     output::OutputLayout,
     process::{BoundedCommand, HealthCheck, ManagedChild, remaining, sleep_before_checked},
     result::FailureReason,
+    session::AppBackend,
 };
 use anyhow::{Context, ensure};
 use serde_json::{Value, json};
@@ -26,6 +27,7 @@ pub const CLIENT: &str = include_str!("../../desktop/gnome/client.py");
 
 pub struct Gnome {
     pub workspace: Rc<Workspace>,
+    backend: AppBackend,
     shell: Rc<RefCell<ManagedChild>>,
     app: Option<Rc<RefCell<ManagedChild>>>,
     keyring: Option<ManagedChild>,
@@ -39,6 +41,7 @@ impl Gnome {
     pub fn start(
         workspace: Rc<Workspace>,
         layout: &OutputLayout,
+        backend: AppBackend,
         deadline: Instant,
     ) -> anyhow::Result<Self> {
         let extension = workspace
@@ -73,16 +76,30 @@ impl Gnome {
             .output_before_checked(deadline, &HealthCheck::default())?;
         ensure!(output.status.success(), "enabling session accessibility");
         let bus_path = workspace.home.join("session-bus");
-        let shell = workspace.command("dbus-run-session").args(["--", "sh", "-c",
-            "printf %s \"$DBUS_SESSION_BUS_ADDRESS\" > \"$1\"; exec gnome-shell --headless --wayland --virtual-monitor=1280x900 --no-x11", "capture-session"])
+        let shell_args = match backend {
+            AppBackend::Wayland => {
+                "printf %s \"$DBUS_SESSION_BUS_ADDRESS\" > \"$1\"; exec gnome-shell --headless --wayland --virtual-monitor=1280x900 --no-x11"
+            }
+            AppBackend::Xwayland => {
+                "printf %s \"$DBUS_SESSION_BUS_ADDRESS\" > \"$1\"; exec gnome-shell --headless --wayland --virtual-monitor=1280x900"
+            }
+        };
+        let shell = workspace
+            .command("dbus-run-session")
+            .args(["--", "sh", "-c", shell_args, "capture-session"])
             .arg(&bus_path)
-            .env("FLATPAK_SMOKE_HELPER_HEALTH_FILE", workspace.home.join("helper-ready"))
+            .env(
+                "FLATPAK_SMOKE_HELPER_HEALTH_FILE",
+                workspace.home.join("helper-ready"),
+            )
             .stdout(File::create(layout.logs_dir.join("desktop.stdout.log"))?)
             .stderr(File::create(layout.logs_dir.join("desktop.stderr.log"))?)
-            .spawn_managed().context("starting GNOME screenshot session")?;
+            .spawn_managed()
+            .context("starting GNOME screenshot session")?;
         layout.append_runner_log(format!("desktop launcher pid: {}", shell.id()))?;
         let mut desktop = Self {
             workspace,
+            backend,
             shell: Rc::new(RefCell::new(shell)),
             app: None,
             keyring: None,
@@ -110,6 +127,19 @@ impl Gnome {
                             .to_string();
                         desktop.helper_ready = Some(desktop.workspace.home.join("helper-ready"));
                         desktop.check(deadline)?;
+                        if backend == AppBackend::Xwayland {
+                            let x11 = desktop
+                                .workspace
+                                .command("xdpyinfo")
+                                .args(["-display", ":0"])
+                                .output_before_checked(deadline, &desktop.health())
+                                .context("checking the GNOME Xwayland display")?;
+                            ensure!(
+                                x11.status.success(),
+                                "GNOME Xwayland display :0 is not ready: {}",
+                                String::from_utf8_lossy(&x11.stderr).trim()
+                            );
+                        }
                         return Ok(desktop);
                     }
                     Err(error) => last_error = error.to_string(),
@@ -165,6 +195,21 @@ impl Gnome {
             sleep_before_checked(Duration::from_millis(50), deadline, &self.health())
                 .context("waiting for an unlocked session keyring")?;
         }
+        let display_args: &[&str] = match self.backend {
+            AppBackend::Wayland => &[
+                "--env=GDK_BACKEND=wayland",
+                "--env=QT_QPA_PLATFORM=wayland",
+                "--env=SDL_VIDEODRIVER=wayland",
+                "--env=MOZ_ENABLE_WAYLAND=1",
+            ],
+            AppBackend::Xwayland => &[
+                "--env=DISPLAY=:0",
+                "--env=GDK_BACKEND=x11",
+                "--env=QT_QPA_PLATFORM=xcb",
+                "--env=SDL_VIDEODRIVER=x11",
+                "--env=MOZ_ENABLE_WAYLAND=0",
+            ],
+        };
         let app = self
             .workspace
             .command("flatpak")
@@ -172,11 +217,8 @@ impl Gnome {
             .args(["run", "--user"])
             .arg(format!("--arch={}", app_ref.arch()))
             .arg(format!("--branch={}", app_ref.branch()))
+            .args(display_args)
             .args([
-                "--env=GDK_BACKEND=wayland",
-                "--env=QT_QPA_PLATFORM=wayland",
-                "--env=SDL_VIDEODRIVER=wayland",
-                "--env=MOZ_ENABLE_WAYLAND=1",
                 "--env=GTK_A11Y=atspi",
                 "--env=QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1",
             ])

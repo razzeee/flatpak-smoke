@@ -13,7 +13,9 @@ use crate::{
     cli::{ScreenshotArgs, ScreenshotBundleArgs, ScreenshotRepoArgs},
     installer::ArtifactInstaller,
     output::OutputLayout,
+    process::{BoundedCommand, HealthCheck},
     result::{Artifact, FailureReason, PhaseMetadata, RecipeMetadata, RunResult, Timings},
+    session::AppBackend,
     tools,
 };
 use anyhow::Context;
@@ -128,11 +130,33 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         phase_metadata.app = Some(app);
         phase_metadata.runtimes = runtimes;
         manifest.app_ref = Some(app_ref.to_string());
+        let permissions = workspace
+            .command("flatpak")
+            .args(["info", "--user", "--show-permissions"])
+            .arg(app_ref.id())
+            .output_before_checked(deadline, &HealthCheck::default())
+            .context("reading effective app display permissions")?;
+        anyhow::ensure!(
+            permissions.status.success(),
+            "reading effective app display permissions: {}",
+            String::from_utf8_lossy(&permissions.stderr).trim()
+        );
+        let backend = AppBackend::from_permissions(&String::from_utf8_lossy(&permissions.stdout));
+        layout.append_runner_log(format!("selected screenshot display backend: {backend:?}"))?;
+        if backend == AppBackend::Xwayland {
+            let missing = tools::missing_tools(tools::XWAYLAND_TOOLS);
+            anyhow::ensure!(
+                missing.is_empty(),
+                "X11 screenshot compatibility requires: {}",
+                missing.join(", ")
+            );
+        }
         let launch_args =
             workspace.prepare_app_data(&app_ref, &recipe, &common.recipe, deadline)?;
         let mut desktop = gnome::Gnome::start(
             workspace.clone(),
             &layout,
+            backend,
             workflow::bounded(deadline, common.display_timeout),
         )
         .map_err(|error| {
@@ -209,7 +233,7 @@ pub fn doctor() -> anyhow::Result<()> {
     let workspace = Rc::new(workspace::Workspace::prepare()?);
     let layout = OutputLayout::prepare(&workspace.home.join("doctor-output"), false)?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    let desktop = gnome::Gnome::start(workspace, &layout, deadline)?;
+    let desktop = gnome::Gnome::start(workspace, &layout, AppBackend::Wayland, deadline)?;
     desktop.check(deadline)?;
     println!("flatpak-smoke doctor: screenshot tools and native helper ok ({version})");
     Ok(())
