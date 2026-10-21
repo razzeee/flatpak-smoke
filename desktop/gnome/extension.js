@@ -95,8 +95,16 @@ export default class Capture extends Extension {
     }
 
     async _call(request) {
+        if (request.action === 'quit') {
+            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                global.context.terminate();
+                return GLib.SOURCE_REMOVE;
+            });
+            return {};
+        }
         if (request.action === 'ping')
-            return {protocol: 1, desktop: 'gnome', version: Config.PACKAGE_VERSION};
+            return {protocol: 1, desktop: 'gnome', version: Config.PACKAGE_VERSION,
+                x11: {display: GLib.getenv('DISPLAY'), authority: GLib.getenv('XAUTHORITY')}};
         if (request.action === 'windows')
             return this._windows().map(window => this._info(window));
         const window = this._windows().find(candidate => candidate.get_stable_sequence() === request.window);

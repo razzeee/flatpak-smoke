@@ -233,6 +233,22 @@ jobs:
             flatpak build-bundle "target/screenshot-$toolkit-repo" "target/org.example.Screenshot$toolkit.flatpak" "org.example.Screenshot$toolkit"
           done
 
+      - name: Build Wayland and X11-only capture fixtures
+        run: |
+          flatpak-builder --force-clean --user --install-deps-from=flathub --repo=target/capture-wayland-repo target/capture-wayland-build fixtures/minimal-wayland/org.example.FlatpakSmokeFixture.yml
+          flatpak build-bundle target/capture-wayland-repo target/org.example.FlatpakSmokeFixture.flatpak org.example.FlatpakSmokeFixture
+          flatpak-builder --force-clean --user --install-deps-from=flathub --repo=target/capture-x11-repo target/capture-x11-build fixtures/minimal-x11/org.example.FlatpakSmokeX11Fixture.yml
+          flatpak build-bundle target/capture-x11-repo target/org.example.FlatpakSmokeX11Fixture.flatpak org.example.FlatpakSmokeX11Fixture
+
+      - name: Check non-root Xwayland capture, input and isolation
+        run: |
+          docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
+            -v "$PWD:/workspace" -w /workspace screenshot-tests sh -c '
+              install -d -o 65534 -g 65534 target/xwayland-capture
+              exec setpriv --reuid=65534 --regid=65534 --clear-groups \
+                python3 tests/xwayland_capture.py --output target/xwayland-capture/run
+            '
+
       - name: Check native window images and input
         run: |
           docker run --rm --privileged --tmpfs /run screenshot-tests flatpak-smoke doctor --desktop gnome
@@ -306,6 +322,7 @@ jobs:
             target/screenshot-failures/**
             target/screenshot-setup-*/**
             target/screenshot-action-*/**
+            target/xwayland-capture/**
 
   publish:
     name: Publish ${{ matrix.image }}
