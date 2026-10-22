@@ -1221,7 +1221,16 @@ impl Screenshotter {
             .arg(path)
             .args(["-fuzz", "0", "-trim", "-format", "%w %h %X %Y", "info:"])
             .output_before_checked(self.deadline.get(), &self.health)
-            .map_err(SessionError::internal)?;
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    SessionError::new(
+                        FailureReason::ScreenshotFailed,
+                        format!("measuring screenshot bounds: {error}"),
+                    )
+                } else {
+                    SessionError::internal(error)
+                }
+            })?;
         if !output.status.success() {
             return Err(SessionError::new(
                 FailureReason::ScreenshotFailed,
@@ -3070,6 +3079,40 @@ esac
         fs::remove_file(&helper).unwrap();
         let error = screenshotter.detect_app_error_text(&frame).unwrap_err();
         assert_eq!(error.reason, FailureReason::DependencyFailed);
+    }
+
+    #[test]
+    fn screenshot_bounds_deadline_is_a_screenshot_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let helper = temp.path().join("convert");
+        fs::write(&helper, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let screenshotter = Screenshotter::new(
+            "unused",
+            vec![("PATH".into(), temp.path().as_os_str().to_owned())],
+            temp.path().join("runner.log"),
+            Instant::now() + Duration::from_secs(30),
+        );
+        let candidate = temp.path().join("candidate.png");
+        let published = temp.path().join("published.png");
+        // Cover both a deadline already spent on the preceding comparison and
+        // one expiring while the bounds helper is running. Neither may publish.
+        for budget in [Duration::ZERO, Duration::from_millis(100)] {
+            let deadline = Instant::now() + budget;
+            screenshotter.deadline.set(deadline);
+            let error = screenshotter
+                .publish_screenshot(&candidate, &published)
+                .unwrap_err();
+            assert_eq!(error.reason, FailureReason::ScreenshotFailed);
+            assert!(
+                error.message.contains("deadline elapsed"),
+                "{}",
+                error.message
+            );
+            assert_eq!(screenshotter.deadline.get(), deadline);
+            assert!(!published.exists());
+        }
     }
 
     #[test]

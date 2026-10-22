@@ -146,3 +146,15 @@ sending Space. Its recipe did not wait for the resulting application state.
 before the final capture, while retaining the independent final-image OCR check.
 Input is sent once; a missing response fails the existing bounded wait rather
 than publishing the old state as the expected "after" capture.
+
+[Run 39864248895](https://github.com/razzeee/flatpak-smoke/actions/runs/39864248895)
+passed native screenshot recipes but exposed a smoke-capture classification
+race in `blank-after-click`: repeated zero-deviation frames were correctly
+rejected, then the bounds helper hit the screenshot-stage deadline and returned
+`internal_error`. Bounds-check timeouts now report `screenshot_failed`, matching
+the other image checks and the unchanged fixture expectation. Other bounds-helper
+errors retain their existing classification. A focused test failed before the
+change (`InternalError != ScreenshotFailed`) and passes for both an already
+expired deadline and expiry inside the helper. The local real blank-after-click
+fixture also fails correctly, retaining its initial screenshot and diagnostic
+candidate without publishing a blank after-click image.
