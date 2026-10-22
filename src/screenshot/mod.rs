@@ -127,7 +127,13 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
             .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
         let mut workspace = workspace::Workspace::prepare()?;
         if common.dependency_repo.is_some() {
-            crate::installer::isolate_system_installations(&workspace.home, &mut workspace.env)?;
+            crate::installer::isolate_system_installations(
+                &workspace.home,
+                &mut workspace.env,
+                &layout.runner_log,
+                deadline,
+            )
+            .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
         }
         let workspace = Rc::new(workspace);
         layout.append_runner_log(format!("capture workspace: {}", workspace.home.display()))?;

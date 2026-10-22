@@ -193,6 +193,17 @@ jobs:
       - name: Verify fresh smoke profiles and detached-app lifecycle
         run: |
           docker build --target e2e-tests -t smoke-lifecycle-tests -f Containerfile .
+          # Exercise the image's Flatpak, not a newer host version which can
+          # hide the empty-system-repository regression (issue #43).
+          docker run --rm --privileged --tmpfs /run \
+            -v "$PWD/target/dependencies:/dependencies:ro" \
+            -e FLATPAK_SMOKE_TEST_DEPENDENCY_REPO=/dependencies \
+            --entrypoint sh smoke-lifecycle-tests -ec '
+              mkdir -p /run/dbus
+              dbus-daemon --system --fork
+              exec runuser -u nobody -- /usr/local/bin/installer-tests \
+                dependency_isolation_supports_sandboxed_subprocesses --ignored --nocapture
+            '
           docker run --rm --privileged --tmpfs /run \
             -v "$PWD:/workspace" -w /workspace --entrypoint python3 smoke-lifecycle-tests \
             tests/smoke_lifecycle.py

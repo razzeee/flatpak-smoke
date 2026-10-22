@@ -103,17 +103,24 @@ where
 
     let workspace = TempDir::new().context("creating temporary run workspace")?;
     let mut env = isolated_flatpak_env(workspace.path())?;
-    if common.dependency_repo.is_some() {
-        crate::installer::isolate_system_installations(workspace.path(), &mut env)?;
-    }
+    let isolation = if common.dependency_repo.is_some() {
+        crate::installer::isolate_system_installations(
+            workspace.path(),
+            &mut env,
+            &layout.runner_log,
+            started + common.overall_timeout,
+        )
+    } else {
+        Ok(())
+    };
     let runner = runner_with_env(&layout, &env);
     layout.append_runner_log(format!("workspace: {}", workspace.path().display()))?;
 
     let overall_deadline = started + common.overall_timeout;
     let installer = ArtifactInstaller::new(&runner, overall_deadline);
     let install_started = Instant::now();
-    let installed = installer
-        .add_dependency_repo(common.dependency_repo.as_deref())
+    let installed = isolation
+        .and_then(|()| installer.add_dependency_repo(common.dependency_repo.as_deref()))
         .map_err(|error| {
             (
                 None,

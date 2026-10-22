@@ -12,6 +12,8 @@ use crate::{
 pub fn isolate_system_installations(
     workspace: &Path,
     env: &mut Vec<(OsString, OsString)>,
+    runner_log: &Path,
+    deadline: Instant,
 ) -> anyhow::Result<()> {
     for (key, directory) in [
         ("FLATPAK_SYSTEM_DIR", "system-flatpak"),
@@ -21,6 +23,23 @@ pub fn isolate_system_installations(
         fs::create_dir_all(&path)?;
         env.push((key.into(), path.into_os_string()));
     }
+    // flatpak-portal spawns `flatpak run` without --user. Flatpak 1.16 opens
+    // every configured installation in that path, including this empty one.
+    // A directory without an OSTree repo breaks sandboxed subprocesses even
+    // though the initial --user launch succeeds. Let Flatpak initialize it,
+    // addressing it as a user installation to avoid the system helper/polkit.
+    let runner = env
+        .iter()
+        .fold(CommandRunner::new(runner_log), |runner, (key, value)| {
+            runner.with_env(key, value)
+        })
+        .with_env("FLATPAK_USER_DIR", workspace.join("system-flatpak"));
+    let output = runner.run("flatpak", ["remotes", "--user"], deadline)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "initializing private system installation: {}",
+        output.stderr.trim()
+    );
     Ok(())
 }
 
