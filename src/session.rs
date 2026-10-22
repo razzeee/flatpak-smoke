@@ -338,9 +338,10 @@ impl<'a> SessionRunner<'a> {
         timeout: Duration,
         screenshots: &mut Vec<String>,
     ) -> Result<(), SessionError> {
-        screenshotter.capture_with_client(client, path, timeout)?;
-        screenshots.push(relative_path);
-        if screenshotter.screenshot_has_content(path)? {
+        let candidate = self.layout.logs_dir.join("output-candidate.png");
+        screenshotter.capture_with_client(client, &candidate, timeout)?;
+        if screenshotter.publish_screenshot(&candidate, path)? {
+            screenshots.push(relative_path);
             Ok(())
         } else {
             Err(SessionError::new(
@@ -367,22 +368,27 @@ impl<'a> SessionRunner<'a> {
         let next_name = click_screenshot_name(index, click_text);
         let next_path = self.layout.screenshot_path(&next_name);
         let next_relative_path = self.layout.relative_screenshot_path(&next_name);
+        let candidate = self.layout.logs_dir.join("output-candidate.png");
         let started = Instant::now();
         screenshotter
             .deadline
             .set(self.overall_deadline.min(started + timeout));
         let mut last_error = None;
         while started.elapsed() < timeout {
-            match screenshotter.capture_once_with_client(client, &next_path) {
+            match screenshotter.capture_once_with_client(client, &candidate) {
                 Ok(()) => {
-                    let has_content = screenshotter.screenshot_has_content(&next_path)?;
                     let changed =
-                        screenshotter.screenshots_differ_after_click(previous_path, &next_path)?;
-                    if has_content && changed {
-                        screenshots.push(next_relative_path);
-                        return Ok(next_path);
+                        screenshotter.screenshots_differ_after_click(previous_path, &candidate)?;
+                    if changed {
+                        if screenshotter.publish_screenshot(&candidate, &next_path)? {
+                            screenshots.push(next_relative_path);
+                            return Ok(next_path);
+                        }
+                        last_error =
+                            Some("screenshot contained no visible app content".to_string());
+                    } else {
+                        last_error = Some("screenshot did not change after click".to_string());
                     }
-                    last_error = Some("screenshot did not change after click".to_string());
                 }
                 Err(error) => last_error = Some(error.message),
             }
@@ -1193,7 +1199,60 @@ impl Screenshotter {
         }
     }
 
+    // Diagnostic captures (including the empty pre-launch baseline) are allowed
+    // to be blank. Only promote a candidate to the result directory after the
+    // same baseline-aware check used for window readiness accepts its pixels.
+    fn publish_screenshot(&self, candidate: &Path, path: &Path) -> Result<bool, SessionError> {
+        if !self.screenshot_has_content(candidate)? {
+            return Ok(false);
+        }
+        fs::copy(candidate, path).map_err(SessionError::internal)?;
+        Ok(true)
+    }
+
     fn screenshot_has_content(&self, path: &Path) -> Result<bool, SessionError> {
+        // A changed solid desktop with only a cursor can look like one large
+        // foreground region against the baseline. Reject only an exactly uniform
+        // frame or variation confined to the known pointer parking area. Size
+        // alone is not cursor evidence: a fullscreen app may have one tiny control.
+        // capture_png parks the pointer at (1, 1) before requesting pixels.
+        let output = self
+            .command("convert")
+            .arg(path)
+            .args(["-fuzz", "0", "-trim", "-format", "%w %h %X %Y", "info:"])
+            .output_before_checked(self.deadline.get(), &self.health)
+            .map_err(SessionError::internal)?;
+        if !output.status.success() {
+            return Err(SessionError::new(
+                FailureReason::ScreenshotFailed,
+                format!(
+                    "measuring screenshot bounds: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            ));
+        }
+        let dimensions = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(str::parse::<i32>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SessionError::internal)?;
+        if dimensions.len() != 4 {
+            return Err(SessionError::new(
+                FailureReason::ScreenshotFailed,
+                "invalid screenshot bounds",
+            ));
+        }
+        let [width, height, x, y] = dimensions[..] else {
+            unreachable!()
+        };
+        if (width == 1 && height == 1)
+            || (x >= 0
+                && y >= 0
+                && x + width <= POINTER_PARK_POSITION.0 + 32
+                && y + height <= POINTER_PARK_POSITION.1 + 32)
+        {
+            return Ok(false);
+        }
         // VNC exposes desktop pixels, not native window geometry. Find connected
         // foreground regions relative to the pre-launch frame, then measure their
         // interiors separately. Measuring the desktop (or a union of windows)
@@ -2614,10 +2673,11 @@ mod tests {
 
     #[test]
     #[ignore = "requires ImageMagick; also covered by the blank-client end-to-end fixture"]
-    fn smoke_content_rejects_blank_windows_and_decorations() {
+    fn smoke_publication_rejects_blank_windows_and_pointer_only_frames() {
         let temp = tempfile::tempdir().unwrap();
         let baseline = temp.path().join("wayland-baseline.png");
         let candidate = temp.path().join("candidate.png");
+        let published = temp.path().join("published.png");
         assert!(
             std::process::Command::new("convert")
                 .args(["-size", "1280x720", "xc:#202020"])
@@ -2634,6 +2694,25 @@ mod tests {
         );
         for (drawing, expected) in [
             ("", false),
+            (
+                "fill white polygon 640,360 640,380 646,374 652,385 656,383 650,372 660,372",
+                false,
+            ),
+            ("fill black rectangle 0,0 1279,719", false),
+            (
+                "fill black rectangle 0,0 1279,719 fill white rectangle 200,250 219,269",
+                true,
+            ),
+            (
+                "fill black rectangle 0,0 1279,719 fill white polygon 1,1 1,21 7,15 13,26 17,24 11,13 21,13",
+                false,
+            ),
+            // Away from the parked pointer, cursor-like app pixels cannot be
+            // distinguished from a legitimate small control on a changed desktop.
+            (
+                "fill black rectangle 0,0 1279,719 fill white polygon 640,360 640,380 646,374 652,385 656,383 650,372 660,372",
+                true,
+            ),
             ("fill white rectangle 80,80 679,479", false),
             (
                 "fill #181818 rectangle 60,60 699,499 fill white rectangle 80,80 679,479 fill #888888 rectangle 80,80 679,119",
@@ -2645,6 +2724,12 @@ mod tests {
             ),
             (
                 "fill #242424 rectangle 80,80 679,479 fill white rectangle 200,250 400,270",
+                true,
+            ),
+            // A minimal control inside a real dark window is not a lone cursor:
+            // the window itself provides bounds even when its interior is sparse.
+            (
+                "fill #242424 rectangle 80,80 679,479 fill white rectangle 200,250 219,269",
                 true,
             ),
             ("fill white rectangle 0,0 1279,719", false),
@@ -2660,10 +2745,22 @@ mod tests {
             }
             assert!(command.arg(&candidate).status().unwrap().success());
             assert_eq!(
-                screenshotter.screenshot_has_content(&candidate).unwrap(),
+                screenshotter
+                    .publish_screenshot(&candidate, &published)
+                    .unwrap(),
                 expected,
                 "{drawing}"
             );
+            assert!(baseline.is_file(), "empty baseline must remain available");
+            assert!(
+                candidate.is_file(),
+                "rejected pixels must remain diagnostic"
+            );
+            assert_eq!(published.exists(), expected, "{drawing}");
+            if expected {
+                assert_eq!(fs::read(&published).unwrap(), fs::read(&candidate).unwrap());
+                fs::remove_file(&published).unwrap();
+            }
         }
     }
 

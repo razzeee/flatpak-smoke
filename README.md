@@ -40,6 +40,17 @@ The action fails if installation or startup fails, the app exits during the test
 no visible content appears, or OCR detects a known fatal error message. It saves
 `result.json`, screenshots, and logs in the output directory.
 
+Final screenshots must pass a content heuristic; empty diagnostic baselines and
+`last-candidate.png` remain available in the logs. Smoke capture parks the VNC
+pointer at `(1, 1)` and rejects variation confined to that parking area, rather
+than rejecting every small control. This depends on pointer parking taking
+effect; app content confined to that area is also indistinguishable from a cursor.
+Recipe capture excludes the compositor cursor through GNOME's screenshot API
+and checks the window interior before publishing. Neither pipeline can reliably
+identify an app-drawn cursor-like shape from pixels alone. Sparse controls are
+allowed when they pass the existing interior-contrast threshold; small windows,
+header-only content, and very low-contrast content may still fail that heuristic.
+
 `allow-network-remotes` lets Flatpak download missing runtimes from Flathub. For
 apps that reject root, add `user: nobody`. To click a button and check the next
 screen, add `--screenshot-after-click "Log In"` to `args`.

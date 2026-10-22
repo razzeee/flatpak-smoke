@@ -46,11 +46,14 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets
 
-      - name: Check smoke content detection with real image tools
+      - name: Check smoke and recipe publication with real image tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends imagemagick
-          cargo test smoke_content_rejects_blank_windows_and_decorations -- --ignored
+          cargo test publication -- --ignored
+
+      - name: Check GNOME cursor exclusion contract
+        run: node --test tests/gnome-capture.mjs
 
       - name: Check compatibility report validation
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/compatibility -p test_matrix.py
