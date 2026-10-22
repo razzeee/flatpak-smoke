@@ -111,3 +111,29 @@ VSCodium's README editor; and require the other five apps to remain green.
 Record the candidate image digests and run URL. The subprocess regression alone
 does not meet that consumer gate. Do not use the globally debug-enabled run
 39852795132 as provenance evidence.
+
+## CI fixture follow-up
+
+[The first PR CI run](https://github.com/razzeee/flatpak-smoke/actions/runs/39859610043)
+passed the new subprocess regression and native screenshot recipes, but one
+concurrent Xwayland fixture exited with `Extension org.freedesktop.Platform.GL.default
+has invalid merge-dirs`. That fixture does not enable dependency reuse.
+
+A local syscall trace reproduced the same diagnostic with Flatpak 1.16.6:
+
+```text
+openat2(19, "vulkan/explicit_layer.d", {flags=O_RDONLY|O_CLOEXEC|O_PATH,
+  resolve=RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH}, 24) = -1 EAGAIN (Resource temporarily unavailable)
+```
+
+Debian's backported extension-path validation reports errors other than
+`ENOENT`/`ENOTDIR` as invalid merge directories, including this transient kernel
+error. The hosted artifact does not include a syscall trace, so the exact hosted
+errno is unavailable.
+
+`tests/xwayland.py` now selects `FLATPAK_GL_DRIVERS=none` for its Cairo-only GTK
+fixtures, avoiding unused graphics-extension resolution. This is a fixture-only
+environment setting; production driver selection and real-app tests are
+unchanged. There are no retries or relaxed assertions. Local end-to-end validation
+passed all seven cases: native Wayland, X11, both concurrent X11 runs,
+exit-after-click, cancellation and injected readiness failure.

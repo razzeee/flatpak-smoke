@@ -31,7 +31,14 @@ def main():
         if not cancel:
             command += ["--screenshot-after-click", "Click Me"]
         env = dict(os.environ, DISPLAY=":987", WAYLAND_DISPLAY="caller-wayland",
-                   XAUTHORITY="/nonexistent/caller-authority", FLATPAK_SMOKE_FIXTURE_MODE=mode)
+                    XAUTHORITY="/nonexistent/caller-authority", FLATPAK_SMOKE_FIXTURE_MODE=mode)
+        # These GTK fixtures use Cairo, including GSK_RENDERER=cairo supplied by
+        # the verifier. They need no GL extensions. Debian's Flatpak 1.16.6 can
+        # misreport transient openat2(RESOLVE_BENEATH) EAGAIN errors while merging
+        # those extensions as "invalid merge-dirs" during concurrent launches.
+        # Keep this test about real display/capture isolation, without retries
+        # or changing the production launch environment.
+        env["FLATPAK_GL_DRIVERS"] = "none"
         if readiness_failure:
             tools = args.output / f"{name}-tools"
             tools.mkdir()
