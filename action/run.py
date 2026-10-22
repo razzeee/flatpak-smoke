@@ -45,6 +45,12 @@ def command(inputs, workspace):
     output = workspace_path(workspace, inputs.get("output") or "artifacts/flatpak-smoke", "output")
     subcommand = ("screenshot" if mode == "screenshots" else "verify") + ("-bundle" if bundle else "-repo")
     cli = ["flatpak-smoke", subcommand, *source, "--output", output]
+    dependency_repo = inputs.get("dependency-repo", "")
+    if dependency_repo:
+        dependency_repo = workspace_path(workspace, dependency_repo, "dependency-repo", "directory")
+        if Path(output).is_relative_to(dependency_repo) or Path(dependency_repo).is_relative_to(output):
+            raise ValueError("output and dependency-repo must not overlap")
+        cli += ["--dependency-repo", dependency_repo]
     recipe = inputs.get("recipe", "")
     if mode == "screenshots":
         cli += ["--recipe", workspace_path(workspace, recipe, "recipe", "file")]
@@ -57,8 +63,8 @@ def command(inputs, workspace):
         cli.append("--allow-network-remotes")
     extra = shlex.split(inputs.get("args", ""))
     for arg in extra:
-        if "\0" in arg or arg.split("=", 1)[0] in ("--output", "--recipe", "--allow-network-remotes"):
-            raise ValueError("args must not contain NUL or override output, recipe, or allow-network-remotes inputs")
+        if "\0" in arg or arg.split("=", 1)[0] in ("--output", "--recipe", "--allow-network-remotes", "--dependency-repo"):
+            raise ValueError("args must not contain NUL or override output, recipe, allow-network-remotes, or dependency-repo inputs")
     cli += extra
     user = inputs.get("user") or "root"
     if user not in ("root", "nobody"):
@@ -72,7 +78,10 @@ def command(inputs, workspace):
     docker = ["docker", "run", "--rm", "--init", "--name", name, "--privileged", "--tmpfs", "/run"]
     if mode == "screenshots":
         docker += ["--tmpfs", "/dev/dri"]
-    docker += ["-v", f"{workspace}:/workspace", "-w", "/workspace",
+    docker += ["-v", f"{workspace}:/workspace", "-w", "/workspace"]
+    if dependency_repo:
+        docker += ["-v", f"{workspace / dependency_repo}:/workspace/{dependency_repo}:ro"]
+    docker += [
                "-v", f"{HERE / 'container.sh'}:/flatpak-smoke-action.sh:ro",
                "--entrypoint", "sh", image, "/flatpak-smoke-action.sh",
                user, str(os.getuid()), str(os.getgid()), output, *cli]

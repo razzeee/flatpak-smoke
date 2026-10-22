@@ -124,12 +124,19 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         recipe.validate_setup()?;
         check_dependencies(workflow::bounded(deadline, Duration::from_secs(5)))
             .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
-        let workspace = Rc::new(workspace::Workspace::prepare()?);
+        let mut workspace = workspace::Workspace::prepare()?;
+        if common.dependency_repo.is_some() {
+            crate::installer::isolate_system_installations(&workspace.home, &mut workspace.env)?;
+        }
+        let workspace = Rc::new(workspace);
         layout.append_runner_log(format!("capture workspace: {}", workspace.home.display()))?;
         let runner = workspace.installer_runner(&layout);
         let installer = ArtifactInstaller::new(&runner, deadline);
         let install_started = Instant::now();
         let installed = (|| {
+            installer
+                .add_dependency_repo(common.dependency_repo.as_deref())
+                .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
             installer
                 .add_flathub_if_allowed(common.allow_network_remotes)
                 .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;

@@ -11,6 +11,8 @@ inputs:
     description: Workspace-relative path to a local OSTree repository, instead of bundle
   app-ref:
     description: Full app/ID/ARCH/BRANCH ref, required with repo
+  dependency-repo:
+    description: Workspace-relative frozen Flatpak repository supplying runtimes and extensions
   recipe:
     description: Workspace-relative screenshot recipe path, required for screenshots
   output:
