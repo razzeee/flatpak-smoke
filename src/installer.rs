@@ -1,4 +1,4 @@
-use std::{ffi::OsString, path::Path, time::Instant};
+use std::{ffi::OsString, fs, path::Path, time::Instant};
 
 use anyhow::bail;
 
@@ -6,6 +6,23 @@ use crate::{
     command::CommandRunner,
     result::{FailureReason, InstalledRef},
 };
+
+/// With explicit dependency inputs, host installations must not satisfy dependencies
+/// behind our backs. Both installation and launch use these same private paths.
+pub fn isolate_system_installations(
+    workspace: &Path,
+    env: &mut Vec<(OsString, OsString)>,
+) -> anyhow::Result<()> {
+    for (key, directory) in [
+        ("FLATPAK_SYSTEM_DIR", "system-flatpak"),
+        ("FLATPAK_CONFIG_DIR", "flatpak-config"),
+    ] {
+        let path = workspace.join(directory);
+        fs::create_dir_all(&path)?;
+        env.push((key.into(), path.into_os_string()));
+    }
+    Ok(())
+}
 
 pub struct ArtifactInstaller<'a> {
     runner: &'a CommandRunner,
@@ -15,6 +32,34 @@ pub struct ArtifactInstaller<'a> {
 impl<'a> ArtifactInstaller<'a> {
     pub fn new(runner: &'a CommandRunner, deadline: Instant) -> Self {
         Self { runner, deadline }
+    }
+
+    pub fn add_dependency_repo(&self, repo: Option<&Path>) -> anyhow::Result<()> {
+        let Some(repo) = repo else { return Ok(()) };
+        let repo = repo.canonicalize()?;
+        anyhow::ensure!(
+            repo.join("config").is_file() && repo.join("summary").is_file(),
+            "dependency repo must be a published Flatpak repository with config and summary (run flatpak build-update-repo)"
+        );
+        let output = self.runner.run(
+            "flatpak",
+            [
+                OsString::from("remote-add"),
+                OsString::from("--user"),
+                OsString::from("--no-gpg-verify"),
+                OsString::from("--no-follow_redirect"),
+                OsString::from("--prio=100"),
+                OsString::from("flatpak-smoke-dependencies"),
+                repo.into_os_string(),
+            ],
+            self.deadline,
+        )?;
+        anyhow::ensure!(
+            output.status.success(),
+            "adding dependency repo: {}",
+            output.stderr.trim()
+        );
+        Ok(())
     }
 
     pub fn add_flathub_if_allowed(&self, allow_network_remotes: bool) -> anyhow::Result<()> {
@@ -204,6 +249,10 @@ fn classify_install_error(stderr: String) -> InstallError {
 
     InstallError::new(reason, format!("flatpak install failed: {}", stderr.trim()))
 }
+
+#[cfg(test)]
+#[path = "installer/tests.rs"]
+mod integration_tests;
 
 #[cfg(test)]
 mod tests {

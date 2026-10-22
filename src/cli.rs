@@ -51,6 +51,9 @@ pub struct ScreenshotRepoArgs {
 
 #[derive(Debug, Args)]
 pub struct ScreenshotArgs {
+    /// Frozen local Flatpak repository supplying runtimes and extensions.
+    #[arg(long)]
+    pub dependency_repo: Option<PathBuf>,
     #[arg(long)]
     pub recipe: PathBuf,
     #[arg(long)]
@@ -88,6 +91,9 @@ pub struct VerifyRepoArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct VerifyCommonArgs {
+    /// Frozen local Flatpak repository supplying runtimes and extensions.
+    #[arg(long)]
+    pub dependency_repo: Option<PathBuf>,
     #[arg(long)]
     pub output: PathBuf,
 

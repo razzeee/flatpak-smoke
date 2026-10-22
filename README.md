@@ -1,5 +1,8 @@
 # flatpak-smoke
 
+For repeated verification and screenshot runs, see [reusable runtime inputs](docs/reusable-dependencies.md)
+for the shared `--dependency-repo` option and action input.
+
 Check that your Flatpak installs and shows a window, or capture native-window
 screenshots for your app listing. Both workflows run headlessly in CI.
 

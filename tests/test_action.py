@@ -103,11 +103,29 @@ class ActionTests(unittest.TestCase):
             {"args": "--allow-network-remotes"}, {"args": '"unclosed'},
             {"execution-timeout": "0"}, {"execution-timeout": "5m"},
             {"cleanup-timeout": "-1"}, {"cleanup-timeout": "86401"},
+            {"dependency-repo": "../outside"}, {"dependency-repo": "missing"},
+            {"args": "--dependency-repo=other"},
         ]:
             with self.subTest(changes=changes):
                 result = self.run_action({"bundle": "app bundle.flatpak", **changes})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((self.workspace / "docker.json").exists(), result.stdout)
+
+    def test_dependency_repo_is_read_only_in_both_modes(self):
+        (self.workspace / "dependencies").mkdir()
+        (self.workspace / "recipe.yml").touch()
+        for mode in ("verify", "screenshots"):
+            inputs = {"bundle": "app bundle.flatpak", "dependency-repo": "dependencies", "mode": mode}
+            if mode == "screenshots":
+                inputs["recipe"] = "recipe.yml"
+            result = self.run_action(inputs)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            command = json.loads((self.workspace / "docker.json").read_text())
+            self.assertIn(f"{self.workspace}/dependencies:/workspace/dependencies:ro", command)
+            self.assertEqual(command[command.index("--dependency-repo") + 1], "dependencies")
+        result = self.run_action({"bundle": "app bundle.flatpak", "dependency-repo": "dependencies",
+                                  "output": "dependencies/results"})
+        self.assertNotEqual(result.returncode, 0)
 
     def test_symlink_output_cannot_escape_workspace(self):
         (self.workspace / "escape").symlink_to(self.workspace.parent, target_is_directory=True)
