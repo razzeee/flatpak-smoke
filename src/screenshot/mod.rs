@@ -117,6 +117,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>()
             ),
+            input_digest: None,
         }),
         ..PhaseMetadata::default()
     };
@@ -187,8 +188,18 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
                 missing.join(", ")
             );
         }
-        let launch_args =
-            workspace.prepare_app_data(&app_ref, &recipe, &common.recipe, deadline)?;
+        let prepared = workspace.prepare_app_data(
+            &app_ref,
+            &recipe,
+            &common.recipe,
+            &recipe_contents,
+            deadline,
+        )?;
+        phase_metadata
+            .recipe
+            .as_mut()
+            .expect("recipe metadata initialized")
+            .input_digest = Some(prepared.input_digest);
         let mut desktop = gnome::Gnome::start(
             workspace.clone(),
             &layout,
@@ -206,7 +217,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         let launch_started = Instant::now();
         desktop.launch(
             &app_ref,
-            &launch_args,
+            &prepared.launch_args,
             &layout,
             workflow::bounded(deadline, common.window_timeout),
         )?;
