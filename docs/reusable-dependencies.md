@@ -52,9 +52,9 @@ with:
   image: flatpak-smoke-with-dependencies
 ```
 
-Until this feature is included in a versioned release image, build this checkout's
-`Containerfile` (or `Containerfile.screenshots`) and set `image` to that local image.
-The existing v0.4.2 images do not accept this new option.
+The v0.5.0 release images include this option. Earlier images, including v0.4.2,
+do not accept it. Before v0.5.0 is published, build this checkout's `Containerfile`
+(or `Containerfile.screenshots`) and set `image` to that local image.
 
 The existing `repo` + `app-ref` input also works with `dependency-repo`; this avoids
 app bundle serialization if you already have a **published** app repository.
