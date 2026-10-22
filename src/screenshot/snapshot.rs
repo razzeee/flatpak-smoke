@@ -1,6 +1,7 @@
 use super::{
     desktop::{Desktop, Window},
     images::{ImageInfo, Images},
+    infrastructure,
 };
 use anyhow::{Context, ensure};
 use std::{fs, path::Path, time::Instant};
@@ -29,6 +30,7 @@ impl CaptureSnapshot {
         self.scratch
             .close()
             .context("removing screenshot snapshot scratch image")
+            .map_err(infrastructure)
     }
 }
 
@@ -63,7 +65,8 @@ where
         .prefix("capture-")
         .suffix(".png")
         .tempfile_in(logs)
-        .context("creating screenshot snapshot scratch image")?
+        .context("creating screenshot snapshot scratch image")
+        .map_err(infrastructure)?
         .into_temp_path();
     let result = (|| {
         let window = desktop.capture(window_id, &scratch, deadline)?;
@@ -84,7 +87,7 @@ where
             "native image and window buffer dimensions differ"
         );
 
-        promote_candidate(&scratch, logs)?;
+        promote_candidate(&scratch, logs).map_err(infrastructure)?;
         Ok((window, image))
     })();
     let ((window, image), scratch) = finish_scratch(result, scratch)?;

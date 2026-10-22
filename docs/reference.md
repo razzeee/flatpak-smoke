@@ -203,6 +203,31 @@ than replace, `app_ref` and `screenshots.json` metadata.
 
 On failure, `status` is `failed` and `failure` contains a machine-readable reason plus a human-readable message.
 
+Screenshot runs can additionally report `failure.category`:
+
+| Category | Meaning |
+| --- | --- |
+| `infrastructure` | A known capture mechanism failure: helper disconnect/transport/invalid JSON, snapshot storage/cleanup, screenshot publication, or an otherwise unclassified final helper query failure. |
+| `expectation` | An unmet observable expectation: no matching window before its deadline, or a click-text target that is missing or ambiguous. This does not establish whether the app or recipe is at fault. |
+
+For example, a disconnected native helper reports
+`{"reason":"screenshot_failed","category":"infrastructure","message":"native capture helper disconnected"}`.
+The existing reason codes and schema version 1 are retained; category is an
+optional additive field. Missing or null category means **unclassified**, not
+recipe failure. Older runners, verification runs, and capture paths without a
+known classification omit it. In particular, `screenshot_failed` alone does not
+distinguish infrastructure from app/recipe behavior. Consumers should tolerate
+unknown categories and retain their own verdict/presentation policy.
+
+The category describes the primary reported failure, not every secondary cleanup
+error in the message. Concrete process/helper health failures take precedence
+over a step error; a bare deadline check does not erase that step's classified
+failure. Final helper checks preserve existing specific reasons such as
+`display_exited` and `early_exit`. `screenshots.json.failed_step_index` locates
+recipe-step failures; a null index can also indicate a final helper-check failure.
+Preflight and output failures that prevent result publication can still leave no
+`result.json`.
+
 Failures retain earlier captured screenshots in `screenshots`. If a complete
 candidate frame was captured, the list also includes `logs/last-candidate.png`,
 even when that frame did not satisfy readiness or post-click checks. This

@@ -14,7 +14,9 @@ use crate::{
     installer::ArtifactInstaller,
     output::OutputLayout,
     process::{BoundedCommand, HealthCheck},
-    result::{Artifact, FailureReason, PhaseMetadata, RecipeMetadata, RunResult, Timings},
+    result::{
+        Artifact, FailureCategory, FailureReason, PhaseMetadata, RecipeMetadata, RunResult, Timings,
+    },
     session::AppBackend,
     tools,
 };
@@ -31,6 +33,7 @@ use std::{
 #[derive(Debug)]
 pub struct CaptureFailure {
     reason: FailureReason,
+    category: Option<FailureCategory>,
     message: String,
 }
 impl std::fmt::Display for CaptureFailure {
@@ -42,9 +45,35 @@ impl std::error::Error for CaptureFailure {}
 fn failure(reason: FailureReason, message: impl Into<String>) -> anyhow::Error {
     CaptureFailure {
         reason,
+        category: None,
         message: message.into(),
     }
     .into()
+}
+
+fn categorized_failure(
+    reason: FailureReason,
+    category: FailureCategory,
+    message: impl Into<String>,
+) -> anyhow::Error {
+    CaptureFailure {
+        reason,
+        category: Some(category),
+        message: message.into(),
+    }
+    .into()
+}
+
+fn infrastructure(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<CaptureFailure>().is_some() {
+        error
+    } else {
+        categorized_failure(
+            FailureReason::ScreenshotFailed,
+            FailureCategory::Infrastructure,
+            format!("{error:#}"),
+        )
+    }
 }
 
 enum Source {
@@ -223,6 +252,11 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         ),
     };
     result.phase_metadata = phase_metadata;
+    if let (Some(failure), Err(error)) = (&mut result.failure, &outcome) {
+        failure.category = error
+            .downcast_ref::<CaptureFailure>()
+            .and_then(|error| error.category);
+    }
     manifest.write(&common.output.join("screenshots.json"))?;
     layout.write_result(&result)?;
     outcome
