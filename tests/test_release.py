@@ -37,7 +37,7 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             summary = Path(directory) / "summary"
             env = {"RELEASE_IMAGE": "ghcr.io/razzeee/flatpak-smoke",
-                   "RELEASE_TAG": "v0.5.0", "RELEASE_REVISION": "b" * 40,
+                   "RELEASE_TAG": "v0.5.1", "RELEASE_REVISION": "b" * 40,
                    "RELEASE_DIGEST": digest if digest is not None else expected,
                    "GITHUB_STEP_SUMMARY": str(summary), "DOCKER_CONFIG": "/publishing-credentials"}
             calls = []
@@ -62,7 +62,7 @@ class ReleaseTests(unittest.TestCase):
                     self.assertFalse(summary.exists())
                 else:
                     script["main"]()
-                    self.assertEqual(calls, [f'{env["RELEASE_IMAGE"]}:v0.5.0',
+                    self.assertEqual(calls, [f'{env["RELEASE_IMAGE"]}:v0.5.1',
                                             f'{env["RELEASE_IMAGE"]}:sha-{"b" * 40}',
                                             f'{env["RELEASE_IMAGE"]}@{expected}'])
                     self.assertIn(f'{env["RELEASE_IMAGE"]}@{expected}', summary.read_text())

@@ -52,9 +52,10 @@ with:
   image: flatpak-smoke-with-dependencies
 ```
 
-The v0.5.0 release images include this option. Earlier images, including v0.4.2,
-do not accept it. Before v0.5.0 is published, build this checkout's `Containerfile`
-(or `Containerfile.screenshots`) and set `image` to that local image.
+Dependency reuse is available since v0.5.0; use v0.5.1 or newer for the
+sandboxed-subprocess fix. Earlier images, including v0.4.2, do not accept this
+option. To test an unreleased checkout, build its `Containerfile` (or
+`Containerfile.screenshots`) and set `image` to that local image.
 
 The existing `repo` + `app-ref` input also works with `dependency-repo`; this avoids
 app bundle serialization if you already have a **published** app repository.
