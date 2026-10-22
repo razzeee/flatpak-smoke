@@ -86,6 +86,72 @@ export default class Capture extends Extension {
             pressed ? Clutter.KeyState.PRESSED : Clutter.KeyState.RELEASED);
     }
 
+    _focusState(selected) {
+        // Some X11 dialogs (including VLC's first-run privacy prompt) have no
+        // transient parent. Record actual identities instead of guessing which
+        // same-app window may safely receive input or be captured.
+        const identity = window => window ? {
+            id: window.get_stable_sequence(), title: window.get_title() ?? '',
+            app_id: window.get_sandboxed_app_id() ?? '', pid: window.get_pid(),
+            transient_for: window.get_transient_for()?.get_stable_sequence() ?? null,
+            type: window.get_window_type(), hidden: window.is_hidden(),
+            minimized: window.minimized,
+        } : null;
+        return {
+            selected: identity(selected), focused: identity(global.display.focus_window),
+            desktop_modal_count: Main.modalCount,
+            windows: this._windows().map(identity),
+        };
+    }
+
+    async _focus(window) {
+        const deadline = GLib.get_monotonic_time() + 2_000_000;
+        let hidden = window.is_hidden();
+        this._assertUnblocked(window);
+        window.activate(global.get_current_time());
+        while (true) {
+            this._assertUnblocked(window);
+            if (!this._windows().includes(window))
+                throw new Error('Selected window no longer exists');
+            if (global.display.focus_window === window)
+                return;
+            if (GLib.get_monotonic_time() >= deadline)
+                throw new Error(`Could not focus selected window: ${JSON.stringify(this._focusState(window))}`);
+            await delay(50);
+            this._assertUnblocked(window);
+            const nowHidden = window.is_hidden();
+            // Activation of an Xwayland window before mapping can have no
+            // effect. Retry only that transition, not the action or whole run.
+            if (hidden && !nowHidden)
+                window.activate(global.get_current_time());
+            hidden = nowHidden;
+        }
+    }
+
+    _assertUnblocked(window) {
+        if (Main.modalCount > 0)
+            throw new Error('A desktop modal dialog blocks the selected window');
+        const appId = window.get_sandboxed_app_id();
+        // A modal can open another dialog. Its own transient descendants are
+        // valid targets, even when the modal itself has no transient parent.
+        const ancestry = window => {
+            const chain = new Set();
+            for (let current = window; current && !chain.has(current);
+                current = current.get_transient_for())
+                chain.add(current);
+            return chain;
+        };
+        const ancestors = ancestry(window);
+        const modal = this._windows().find(candidate => candidate !== window &&
+            candidate.get_window_type() === Meta.WindowType.MODAL_DIALOG &&
+            !candidate.is_hidden() &&
+            (ancestry(candidate).has(window) ||
+                (candidate.get_transient_for() === null && !ancestors.has(candidate) && appId &&
+                    candidate.get_sandboxed_app_id() === appId)));
+        if (modal)
+            throw new Error(`An application modal dialog blocks the selected window: ${JSON.stringify(this._focusState(window))}`);
+    }
+
     async _chord(keys) {
         for (const key of keys)
             this._key(key, true);
@@ -113,12 +179,7 @@ export default class Capture extends Extension {
         if (request.app_id && window.get_sandboxed_app_id() !== request.app_id)
             throw new Error('Selected window does not belong to the launched app');
         Main.overview.hide();
-        window.activate(global.get_current_time());
-        await delay(100);
-        if (global.display.focus_window !== window)
-            throw new Error('Could not focus selected window');
-        if (Main.modalCount > 0)
-            throw new Error('A desktop modal dialog blocks the selected window');
+        await this._focus(window);
         if (request.action === 'focus')
             return this._info(window);
         if (request.action === 'resize') {

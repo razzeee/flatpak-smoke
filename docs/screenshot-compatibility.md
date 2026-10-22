@@ -1,12 +1,12 @@
 # Screenshot compatibility
 
-The real-app matrix tests GNOME Calculator, KCalc, and VSCodium using their
+The real-app matrix tests GNOME Calculator, KCalc, VLC, and VSCodium using their
 Flathub bundles. Each app runs three times serially and twice concurrently, with
 two captures per run. Failed runs remain failures; the matrix does not retry them.
 
 ## Tested configuration
 
-The local matrix passed all 15 runs with these builds:
+The original local matrix passed all 15 runs with these builds:
 
 | App | Version | Runtime | Recipe coverage |
 | --- | --- | --- | --- |
@@ -29,6 +29,18 @@ when a launcher exits successfully, and stops those instances during cleanup.
 It starts and unlocks one private keyring daemon before launching the app.
 Desktop modal dialogs block capture/input rather than silently receiving input
 intended for an app.
+
+VLC's fresh profile opens an application-modal **Privacy and Network Access
+Policy** window. The VLC recipe explicitly disables that prompt and network
+metadata access with `--no-qt-privacy-ask --no-metadata-network-access`. It tests
+the initial view and opening the playlist by keyboard. VLC 3.0.23 on KDE
+5.15-25.08 passed a separate five-run local probe on GNOME 48.7 (three serial,
+two concurrent). This is initialization/input coverage, not video playback.
+See [VLC focus diagnosis](vlc-capture-focus.md) for pinned evidence and limits.
+
+The scheduled/manual compatibility job also runs `tests/compatibility/vlc_focus.py`:
+it requires an unconfigured fresh profile to fail with modal-window diagnostics,
+then validates both captures from the configured recipe. Each case runs once.
 
 ## Run the matrix
 

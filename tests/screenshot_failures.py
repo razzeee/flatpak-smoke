@@ -40,7 +40,8 @@ def main():
     root = ROOT / args.output
     root.mkdir(parents=True, exist_ok=True)
 
-    def verify(name, recipe, reason, step_index, extra=(), fault=None, environment=None):
+    def verify(name, recipe, reason, step_index, extra=(), fault=None, environment=None,
+               allow_final_check=False):
         if args.case and args.case != name:
             return
         print(f"Checking {name}", flush=True)
@@ -67,7 +68,8 @@ def main():
         assert code == (1 if reason else 0), result
         assert result["status"] == ("failed" if reason else "passed"), result
         assert (result["failure"]["reason"] if reason else result["failure"]) == reason, result
-        assert manifest["failed_step_index"] == step_index, manifest
+        assert (manifest["failed_step_index"] == step_index or
+                (allow_final_check and manifest["failed_step_index"] is None)), manifest
         if step_index is not None and step_index > 0:
             assert manifest["captures"][0]["name"] == "overview", manifest
             assert "screenshots/000-overview.png" in result["screenshots"], result
@@ -85,7 +87,10 @@ def main():
     verify("ambiguous-click", {"steps": [OVERVIEW, {"type_text": "duplicates"}, {"key": "Return"},
                                          {"wait_text": "Results for duplicates"}, {"click_text": "Duplicate"}]},
            "screenshot_failed", 4)
-    verify("app-exit", {"steps": [OVERVIEW, {"key": "Ctrl+q"}]}, "early_exit", 1)
+    # Process exit is asynchronous: it can be observed by the key step's health
+    # check or by final validation, which intentionally has no failed step.
+    verify("app-exit", {"steps": [OVERVIEW, {"key": "Ctrl+q"}]}, "early_exit", 1,
+           allow_final_check=True)
     verify("ambiguous-window", {"steps": [OVERVIEW, {"key": "Ctrl+comma"}, {"key": "Ctrl+comma"},
                                           {"select_window": {"title": "Preferences"}}]}, "screenshot_failed", 3)
     verify("closed-window", {"steps": [OVERVIEW, {"key": "Ctrl+comma"},
