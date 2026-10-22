@@ -25,7 +25,13 @@ RUN apt-get update \
 COPY --from=builder /src/target/release/flatpak-smoke /usr/local/bin/flatpak-smoke
 ENTRYPOINT ["flatpak-smoke"]
 
+FROM builder AS installer-test-builder
+RUN cargo test --locked --lib --no-run \
+  && find target/debug/deps -maxdepth 1 -type f -executable -name 'flatpak_smoke-*' \
+       -exec cp {} /installer-tests \;
+
 FROM runtime AS e2e-tests
+COPY --from=installer-test-builder /installer-tests /usr/local/bin/installer-tests
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 \
   && rm -rf /var/lib/apt/lists/*

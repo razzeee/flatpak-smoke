@@ -33,6 +33,91 @@ fn checked(args: &[&str]) {
     );
 }
 
+// Exercises the portal's second `flatpak run`, which does not pass --user.
+// Run with a published runtime repo containing a runtime with flatpak-spawn.
+#[test]
+#[ignore = "requires Flatpak sandboxing, dbus-run-session and FLATPAK_SMOKE_TEST_DEPENDENCY_REPO"]
+fn dependency_isolation_supports_sandboxed_subprocesses() {
+    let dependencies = std::env::var_os("FLATPAK_SMOKE_TEST_DEPENDENCY_REPO").unwrap();
+    let runtime = std::env::var("FLATPAK_SMOKE_TEST_RUNTIME")
+        .unwrap_or_else(|_| "org.gnome.Platform/x86_64/49".into());
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let build = root.join("build");
+    fs::create_dir_all(build.join("files")).unwrap();
+    fs::create_dir_all(build.join("export")).unwrap();
+    fs::write(build.join("metadata"), format!(
+        "[Application]\nname=org.example.SpawnProbe\nruntime={runtime}\nsdk={runtime}\ncommand=sh\n"
+    )).unwrap();
+    let apps = root.join("apps");
+    checked(&[
+        "flatpak",
+        "build-export",
+        apps.to_str().unwrap(),
+        build.to_str().unwrap(),
+    ]);
+    let mut env = vec![
+        ("HOME".into(), root.join("home").into_os_string()),
+        ("XDG_DATA_HOME".into(), root.join("data").into_os_string()),
+        (
+            "XDG_CONFIG_HOME".into(),
+            root.join("config").into_os_string(),
+        ),
+        ("XDG_CACHE_HOME".into(), root.join("cache").into_os_string()),
+        ("XDG_RUNTIME_DIR".into(), root.join("run").into_os_string()),
+        (
+            "FLATPAK_USER_DIR".into(),
+            root.join("user-flatpak").into_os_string(),
+        ),
+        // This shell-only probe needs no graphics extensions.
+        ("FLATPAK_GL_DRIVERS".into(), "none".into()),
+    ];
+    for (_, value) in &env[..6] {
+        fs::create_dir_all(Path::new(value)).unwrap();
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(root.join("run"), fs::Permissions::from_mode(0o700)).unwrap();
+    isolate_system_installations(
+        root,
+        &mut env,
+        &root.join("log"),
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
+    let runner = env.into_iter().fold(
+        CommandRunner::new(root.join("log")),
+        |runner, (key, value)| runner.with_env(key, value),
+    );
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let installer = ArtifactInstaller::new(&runner, deadline);
+    installer
+        .add_dependency_repo(Some(Path::new(&dependencies)))
+        .unwrap();
+    installer
+        .install_repo_ref(&apps, "app/org.example.SpawnProbe/x86_64/master")
+        .unwrap();
+    let output = runner.run("dbus-run-session", [
+        "--", "flatpak", "run", "--user", "--command=sh", "org.example.SpawnProbe",
+        "-ec", "flatpak-spawn --sandbox --watch-bus sh -ec 'grep -qx sandbox=true /.flatpak-info; echo SUBSANDBOX_OK'",
+    ], deadline).unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        output.stdout,
+        output.stderr
+    );
+    assert_eq!(output.stdout.trim(), "SUBSANDBOX_OK");
+    // Initialization must not populate the private system installation or
+    // expose the caller's system refs/remotes as a fallback.
+    for command in ["list", "remotes"] {
+        let output = runner
+            .run("flatpak", [command, "--system"], deadline)
+            .unwrap();
+        assert!(output.status.success(), "{}", output.stderr);
+        assert!(output.stdout.trim().is_empty(), "{}", output.stdout);
+    }
+}
+
 // Real OSTree/Flatpak transactions without requiring a desktop or network access.
 #[test]
 #[ignore = "requires flatpak and ostree"]
@@ -95,7 +180,13 @@ fn local_dependencies_are_reusable_and_private() {
                 workspace.join("data/flatpak").into_os_string(),
             ),
         ];
-        isolate_system_installations(&workspace, &mut env).unwrap();
+        isolate_system_installations(
+            &workspace,
+            &mut env,
+            &workspace.join("log"),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
         let runner = env.into_iter().fold(
             CommandRunner::new(workspace.join("log")).with_env(
                 "FLATPAK_SYSTEM_DIR",
@@ -201,7 +292,13 @@ fn benchmark_prepared_dependencies() {
             ),
             ("LIBGL_ALWAYS_SOFTWARE".into(), "1".into()),
         ];
-        isolate_system_installations(home, &mut env).unwrap();
+        isolate_system_installations(
+            home,
+            &mut env,
+            &home.join("log"),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
         if name.ends_with("screenshots") {
             env.extend([
                 ("XDG_CURRENT_DESKTOP".into(), "GNOME".into()),
