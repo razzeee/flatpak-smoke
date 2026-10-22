@@ -1213,12 +1213,13 @@ impl Screenshotter {
     fn screenshot_has_content(&self, path: &Path) -> Result<bool, SessionError> {
         // A changed solid desktop with only a cursor can look like one large
         // foreground region against the baseline. Reject only an exactly uniform
-        // frame or variation confined to a standard 32px cursor-sized box; do
-        // not use a brightness or whole-image variance threshold here.
+        // frame or variation confined to the known pointer parking area. Size
+        // alone is not cursor evidence: a fullscreen app may have one tiny control.
+        // capture_png parks the pointer at (1, 1) before requesting pixels.
         let output = self
             .command("convert")
             .arg(path)
-            .args(["-fuzz", "0", "-trim", "-format", "%w %h", "info:"])
+            .args(["-fuzz", "0", "-trim", "-format", "%w %h %X %Y", "info:"])
             .output_before_checked(self.deadline.get(), &self.health)
             .map_err(SessionError::internal)?;
         if !output.status.success() {
@@ -1232,16 +1233,24 @@ impl Screenshotter {
         }
         let dimensions = String::from_utf8_lossy(&output.stdout)
             .split_whitespace()
-            .map(str::parse::<u32>)
+            .map(str::parse::<i32>)
             .collect::<Result<Vec<_>, _>>()
             .map_err(SessionError::internal)?;
-        if dimensions.len() != 2 {
+        if dimensions.len() != 4 {
             return Err(SessionError::new(
                 FailureReason::ScreenshotFailed,
                 "invalid screenshot bounds",
             ));
         }
-        if dimensions[0] <= 32 && dimensions[1] <= 32 {
+        let [width, height, x, y] = dimensions[..] else {
+            unreachable!()
+        };
+        if (width == 1 && height == 1)
+            || (x >= 0
+                && y >= 0
+                && x + width <= POINTER_PARK_POSITION.0 + 32
+                && y + height <= POINTER_PARK_POSITION.1 + 32)
+        {
             return Ok(false);
         }
         // VNC exposes desktop pixels, not native window geometry. Find connected
@@ -2691,8 +2700,18 @@ mod tests {
             ),
             ("fill black rectangle 0,0 1279,719", false),
             (
-                "fill black rectangle 0,0 1279,719 fill white polygon 640,360 640,380 646,374 652,385 656,383 650,372 660,372",
+                "fill black rectangle 0,0 1279,719 fill white rectangle 200,250 219,269",
+                true,
+            ),
+            (
+                "fill black rectangle 0,0 1279,719 fill white polygon 1,1 1,21 7,15 13,26 17,24 11,13 21,13",
                 false,
+            ),
+            // Away from the parked pointer, cursor-like app pixels cannot be
+            // distinguished from a legitimate small control on a changed desktop.
+            (
+                "fill black rectangle 0,0 1279,719 fill white polygon 640,360 640,380 646,374 652,385 656,383 650,372 660,372",
+                true,
             ),
             ("fill white rectangle 80,80 679,479", false),
             (

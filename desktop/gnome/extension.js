@@ -133,6 +133,8 @@ export default class Capture extends Extension {
             const shot = new Shell.Screenshot();
             try {
                 await new Promise((resolve, reject) => {
+                    // include_frame=true, include_cursor=false: reject empty
+                    // clients without mistaking a compositor pointer for content.
                     shot.screenshot_window(true, false, stream, (source, result) => {
                         try { source.screenshot_window_finish(result); resolve(); }
                         catch (error) { reject(error); }

@@ -301,7 +301,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    struct FakeDesktop(Window);
+    struct FakeDesktop(Window, Option<std::path::PathBuf>);
 
     impl Desktop for FakeDesktop {
         fn version(&self) -> &str {
@@ -326,7 +326,11 @@ mod tests {
             Ok(self.0.clone())
         }
         fn capture(&self, _window: u64, path: &Path, _deadline: Instant) -> anyhow::Result<Window> {
-            fs::write(path, b"snapshot bytes")?;
+            if let Some(fixture) = &self.1 {
+                fs::copy(fixture, path)?;
+            } else {
+                fs::write(path, b"snapshot bytes")?;
+            }
             Ok(self.0.clone())
         }
         fn input(&self, _window: u64, _input: Input<'_>, _deadline: Instant) -> anyhow::Result<()> {
@@ -374,6 +378,82 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires ImageMagick"]
+    fn recipe_publication_checks_real_pixels() {
+        use crate::result::FailureReason;
+        use crate::screenshot::{manifest::Manifest, recipe::Recipe};
+
+        // These are window pixels after GNOME excludes the compositor cursor.
+        // A cursor drawn by the app itself is intentionally not shape-classified.
+        for (drawing, expected) in [
+            ("", false),
+            ("fill white rectangle 0,0 899,599", false),
+            ("fill gray rectangle 0,0 899,63", false),
+            ("fill white rectangle 200,250 219,269", true),
+            (
+                "fill #242424 rectangle 0,0 899,599 fill white rectangle 200,250 400,270",
+                true,
+            ),
+            (
+                "fill white polygon 450,300 450,320 456,314 462,325 466,323 460,312 470,312",
+                true,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let fixture = root.path().join("fixture.png");
+            let mut convert = std::process::Command::new("convert");
+            convert.args(["-size", "900x600", "xc:black"]);
+            if !drawing.is_empty() {
+                convert.args(["-draw", drawing]);
+            }
+            assert!(convert.arg(&fixture).status().unwrap().success());
+            let layout =
+                crate::output::OutputLayout::prepare(&root.path().join("output"), false).unwrap();
+            let desktop = FakeDesktop(window(), Some(fixture.clone()));
+            let workspace = Workspace::prepare().unwrap();
+            let workflow = workflow(&desktop, &workspace, &layout);
+            let recipe: Recipe = serde_yaml_ng::from_str(
+                "version: 1\nsteps:\n  - capture:\n      name: main\n      caption: Main view\n",
+            )
+            .unwrap();
+            let mut manifest = Manifest::new();
+            let result = workflow.execute(&recipe, 9, Duration::from_secs(2), &mut manifest);
+            assert_eq!(result.is_ok(), expected, "{drawing}: {result:?}");
+            let published = layout.screenshot_path("000-main.png");
+            assert_eq!(published.exists(), expected);
+            assert_eq!(manifest.captures.len(), usize::from(expected));
+            assert_eq!(
+                fs::read(layout.logs_dir.join("last-candidate.png")).unwrap(),
+                fs::read(&fixture).unwrap(),
+            );
+            if expected {
+                assert_eq!(fs::read(published).unwrap(), fs::read(&fixture).unwrap());
+                assert_eq!(manifest.failed_step_index, None);
+            } else {
+                assert_eq!(manifest.failed_step_index, Some(0));
+                assert_eq!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<crate::screenshot::CaptureFailure>()
+                        .unwrap()
+                        .reason,
+                    FailureReason::ScreenshotFailed
+                );
+                let deadline = Instant::now() + Duration::from_millis(500);
+                assert_eq!(
+                    workflow
+                        .initialize(&recipe, deadline)
+                        .unwrap_err()
+                        .downcast_ref::<crate::screenshot::CaptureFailure>()
+                        .unwrap()
+                        .reason,
+                    FailureReason::WindowTimeout
+                );
+            }
+        }
+    }
+
+    #[test]
     fn finish_snapshot_preserves_primary_error() {
         let result: anyhow::Result<()> = Err(anyhow::anyhow!("action failed"));
         let cleanup = Err(anyhow::anyhow!("cleanup failed"));
@@ -394,7 +474,7 @@ mod tests {
     fn with_snapshot_passes_stable_path_to_consumer() {
         let root = tempfile::tempdir().unwrap();
         let layout = crate::output::OutputLayout::prepare(root.path(), false).unwrap();
-        let desktop = FakeDesktop(window());
+        let desktop = FakeDesktop(window(), None);
         let workspace = Workspace::prepare().unwrap();
         let workflow = workflow(&desktop, &workspace, &layout);
         let snapshot = capture_with_inspector(

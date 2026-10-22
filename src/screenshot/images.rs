@@ -45,6 +45,8 @@ impl Images<'_> {
         let width: u32 = fields[1].parse()?;
         let height: u32 = fields[2].parse()?;
         ensure!(width > 0 && height > 0, "empty capture image");
+        // GNOME capture excludes the compositor cursor. Do not classify small
+        // shapes as cursors here: app-drawn marks can be legitimate controls.
         // Measure the frame interior, not the alpha/shadow border. Reserve the
         // top strip for ordinary native/CSD headers so a titlebar above a blank
         // client does not count as application content. Listing pixels remain
