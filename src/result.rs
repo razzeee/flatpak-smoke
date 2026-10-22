@@ -79,6 +79,8 @@ pub struct InstalledRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecipeMetadata {
     pub content_hash: String,
+    #[serde(default)]
+    pub input_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,6 +188,20 @@ mod tests {
     }
 
     #[test]
+    fn recipe_metadata_accepts_legacy_results_and_round_trips_input_digest() {
+        let mut metadata: RecipeMetadata =
+            serde_json::from_str(r#"{"content_hash":"md5:legacy"}"#).unwrap();
+        assert_eq!(metadata.input_digest, None);
+        metadata.input_digest = Some(format!("v1:sha256:{}", "0".repeat(64)));
+        let value = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(value["content_hash"], "md5:legacy");
+        assert_eq!(
+            serde_json::from_value::<RecipeMetadata>(value).unwrap(),
+            metadata
+        );
+    }
+
+    #[test]
     fn serializes_result_shape() {
         let result = RunResult::passed(
             "app/org.example.App/x86_64/stable".to_string(),
@@ -221,6 +237,7 @@ mod tests {
             }]),
             recipe: Some(RecipeMetadata {
                 content_hash: "md5:d41d8cd98f00b204e9800998ecf8427e".into(),
+                input_digest: None,
             }),
         };
         let value = serde_json::to_value(metadata).unwrap();

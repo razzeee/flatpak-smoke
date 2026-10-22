@@ -22,6 +22,12 @@ pub struct Workspace {
     pub env: Vec<(OsString, OsString)>,
 }
 
+#[derive(Debug)]
+pub struct PreparedAppData {
+    pub launch_args: Vec<String>,
+    pub input_digest: String,
+}
+
 impl Workspace {
     pub fn prepare() -> anyhow::Result<Self> {
         let directory = tempfile::tempdir().context("creating capture workspace")?;
@@ -89,8 +95,10 @@ impl Workspace {
         app_ref: &AppRef,
         recipe: &Recipe,
         recipe_path: &Path,
+        recipe_bytes: &[u8],
         deadline: Instant,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<PreparedAppData> {
+        let mut digest = super::setup::InputDigest::new(recipe_bytes);
         let profile = self.home.join(".var/app").join(app_ref.id());
         fs::create_dir_all(&profile)?;
         for entry in &recipe.setup.files {
@@ -98,22 +106,32 @@ impl Workspace {
                 .parent()
                 .unwrap_or(Path::new("."))
                 .join(&entry.source);
-            super::setup::copy(&source, &profile.join(&entry.destination), deadline).with_context(
-                || {
-                    format!(
-                        "seeding {} from {}",
-                        entry.destination.display(),
-                        source.display()
-                    )
-                },
-            )?;
+            digest.entry();
+            super::setup::copy(
+                &source,
+                &profile.join(&entry.destination),
+                &entry.source,
+                &mut digest,
+                deadline,
+            )
+            .with_context(|| {
+                format!(
+                    "seeding {} from {}",
+                    entry.destination.display(),
+                    source.display()
+                )
+            })?;
         }
-        recipe
+        let launch_args = recipe
             .launch
             .args
             .iter()
             .map(|arg| super::setup::expand(arg, &profile))
-            .collect()
+            .collect::<anyhow::Result<_>>()?;
+        Ok(PreparedAppData {
+            launch_args,
+            input_digest: digest.finish(),
+        })
     }
 }
 
@@ -135,6 +153,70 @@ impl Drop for Workspace {
 mod tests {
     use super::*;
     use crate::screenshot::recipe::Recipe;
+
+    #[test]
+    fn input_digest_tracks_seeded_fixtures_independent_of_tree_location_and_creation_order() {
+        let bytes = b"version: 1\nsetup:\n  files:\n    - {source: gimprc, destination: config/gimprc}\n    - {source: project, destination: data/project}\nsteps: [{capture: {name: main, caption: Main}}]\n";
+        let recipe = Recipe::parse(bytes).unwrap();
+        let app = AppRef::parse("app/org.example.Test/x86_64/stable").unwrap();
+        let seed = |root: &Path| {
+            let workspace = Workspace::prepare().unwrap();
+            let prepared = workspace
+                .prepare_app_data(
+                    &app,
+                    &recipe,
+                    &root.join("recipe.yml"),
+                    bytes,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap();
+            (workspace, prepared.input_digest)
+        };
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (root, names) in [(first.path(), ["a", "z"]), (second.path(), ["z", "a"])] {
+            fs::create_dir_all(root.join("project/nested")).unwrap();
+            fs::write(root.join("gimprc"), "initial settings").unwrap();
+            for name in names {
+                fs::write(root.join("project/nested").join(name), name).unwrap();
+            }
+        }
+        let (snapshot, original) = seed(first.path());
+        assert!(original.starts_with("v1:sha256:"));
+        assert_eq!(original.len(), 74);
+        assert_eq!(original, seed(second.path()).1);
+
+        fs::write(first.path().join("gimprc"), "changed settings").unwrap();
+        assert_ne!(original, seed(first.path()).1);
+        // The digest belongs to the copied snapshot, not subsequent source changes.
+        assert_eq!(
+            fs::read(
+                snapshot
+                    .home
+                    .join(".var/app/org.example.Test/config/gimprc")
+            )
+            .unwrap(),
+            b"initial settings"
+        );
+        fs::write(first.path().join("gimprc"), "initial settings").unwrap();
+        assert_eq!(original, seed(first.path()).1);
+        fs::write(first.path().join("project/nested/a"), "changed nested file").unwrap();
+        assert_ne!(original, seed(first.path()).1);
+        fs::write(first.path().join("project/nested/a"), "a").unwrap();
+        fs::rename(
+            first.path().join("project/nested/a"),
+            first.path().join("project/nested/b"),
+        )
+        .unwrap();
+        assert_ne!(original, seed(first.path()).1);
+        fs::rename(
+            first.path().join("project/nested/b"),
+            first.path().join("project/nested/a"),
+        )
+        .unwrap();
+        fs::create_dir(first.path().join("project/empty")).unwrap();
+        assert_ne!(original, seed(first.path()).1);
+    }
 
     #[test]
     fn recipe_seeds_a_fresh_profile_and_resolves_launch_arguments() {
@@ -166,6 +248,7 @@ steps: [{capture: {name: main, caption: Sample content}}]
                     &app,
                     &recipe,
                     &path,
+                    &fs::read(&path).unwrap(),
                     Instant::now() + Duration::from_secs(5),
                 )
                 .unwrap();
@@ -176,7 +259,7 @@ steps: [{capture: {name: main, caption: Sample content}}]
                 "Sample content"
             );
             assert_eq!(
-                args,
+                args.launch_args,
                 vec![
                     "--open".to_string(),
                     format!(
@@ -230,7 +313,7 @@ steps: [{capture: {name: main, caption: Sample content}}]
                     Duration::from_secs(5)
                 };
             let error = workspace
-                .prepare_app_data(&app, &recipe, &path, deadline)
+                .prepare_app_data(&app, &recipe, &path, &fs::read(&path).unwrap(), deadline)
                 .unwrap_err();
             assert!(format!("{error:#}").contains(message), "{error:#}");
         }

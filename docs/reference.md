@@ -201,6 +201,34 @@ MD5 of the exact recipe file bytes; it is `null` when recipe content cannot be
 read. Verification runs have `recipe: null`. These fields supplement, rather
 than replace, `app_ref` and `screenshots.json` metadata.
 
+Screenshot `phase_metadata.recipe.input_digest` is an additive, nullable field
+in schema version 1. It has format `v1:sha256:<64 lowercase hex digits>` and
+covers the exact parsed YAML bytes plus every referenced `setup.files` file or
+directory tree. Unlike the unchanged YAML-only `content_hash`, it detects
+fixture-only changes. It is populated only after setup and launch-argument
+preparation succeed, before the app starts; earlier failures leave it `null`.
+Older results may omit it. Consumers should compare digests of the same version
+and treat missing/null values as unknown, not as an unchanged input set.
+
+Version 1 hashes a sequence of fields, each prefixed by its byte length as an
+unsigned 64-bit big-endian integer. The fields are:
+
+- ASCII `flatpak-smoke-recipe-input-v1`, then the original YAML bytes.
+- For each setup entry in YAML order, ASCII `setup`, followed by a depth-first
+  traversal of that source, sorting each directory's entries by raw filename
+  bytes. Each node contributes ASCII `directory` or `file`, then its
+  recipe-relative source path (raw Unix path bytes, `/` separator). Files also
+  contribute the 32-byte SHA-256 of their copied contents.
+
+Empty directories and file names count. File contents are hashed from the same
+buffers successfully written to the fresh profile, with no separate source read
+for hashing. Thus the digest describes the seeded snapshot even if a source
+changes during copying; it does not guarantee an atomic snapshot of a concurrently
+edited source tree. Absolute checkout/profile paths, timestamps, permissions,
+unreferenced files, and later app-generated data are excluded. Relocating an
+identical recipe tree preserves the digest. Existing symlink, special-file,
+destination-conflict and deadline checks still apply.
+
 On failure, `status` is `failed` and `failure` contains a machine-readable reason plus a human-readable message.
 
 Screenshot runs can additionally report `failure.category`:
