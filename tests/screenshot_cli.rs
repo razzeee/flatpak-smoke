@@ -64,6 +64,14 @@ fn missing_desktop_dependencies_produce_both_failure_manifests() {
         serde_json::from_slice(&std::fs::read(output.join("result.json")).unwrap()).unwrap();
     assert_eq!(result["status"], "failed");
     assert_eq!(result["failure"]["reason"], "dependency_failed");
+    assert_eq!(
+        result["phase_metadata"]["recipe"]["content_hash"],
+        "md5:03537e741d674fb1bdb7a04c6aa31029"
+    );
+    assert_eq!(
+        result["phase_metadata"]["recipe"]["input_digest"],
+        serde_json::Value::Null
+    );
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(output.join("screenshots.json")).unwrap()).unwrap();
     assert_eq!(manifest["schema_version"], 1);

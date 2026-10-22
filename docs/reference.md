@@ -201,7 +201,60 @@ MD5 of the exact recipe file bytes; it is `null` when recipe content cannot be
 read. Verification runs have `recipe: null`. These fields supplement, rather
 than replace, `app_ref` and `screenshots.json` metadata.
 
+Screenshot `phase_metadata.recipe.input_digest` is an additive, nullable field
+in schema version 1. It has format `v1:sha256:<64 lowercase hex digits>` and
+covers the exact parsed YAML bytes plus every referenced `setup.files` file or
+directory tree. Unlike the unchanged YAML-only `content_hash`, it detects
+fixture-only changes. It is populated only after setup and launch-argument
+preparation succeed, before the app starts; earlier failures leave it `null`.
+Older results may omit it. Consumers should compare digests of the same version
+and treat missing/null values as unknown, not as an unchanged input set.
+
+Version 1 hashes a sequence of fields, each prefixed by its byte length as an
+unsigned 64-bit big-endian integer. The fields are:
+
+- ASCII `flatpak-smoke-recipe-input-v1`, then the original YAML bytes.
+- For each setup entry in YAML order, ASCII `setup`, followed by a depth-first
+  traversal of that source, sorting each directory's entries by raw filename
+  bytes. Each node contributes ASCII `directory` or `file`, then its
+  recipe-relative source path (raw Unix path bytes, `/` separator). Files also
+  contribute the 32-byte SHA-256 of their copied contents.
+
+Empty directories and file names count. File contents are hashed from the same
+buffers successfully written to the fresh profile, with no separate source read
+for hashing. Thus the digest describes the seeded snapshot even if a source
+changes during copying; it does not guarantee an atomic snapshot of a concurrently
+edited source tree. Absolute checkout/profile paths, timestamps, permissions,
+unreferenced files, and later app-generated data are excluded. Relocating an
+identical recipe tree preserves the digest. Existing symlink, special-file,
+destination-conflict and deadline checks still apply.
+
 On failure, `status` is `failed` and `failure` contains a machine-readable reason plus a human-readable message.
+
+Screenshot runs can additionally report `failure.category`:
+
+| Category | Meaning |
+| --- | --- |
+| `infrastructure` | A known capture mechanism failure: helper disconnect/transport/invalid JSON, snapshot storage/cleanup, screenshot publication, or an otherwise unclassified final helper query failure. |
+| `expectation` | An unmet observable expectation: no matching window before its deadline, or a click-text target that is missing or ambiguous. This does not establish whether the app or recipe is at fault. |
+
+For example, a disconnected native helper reports
+`{"reason":"screenshot_failed","category":"infrastructure","message":"native capture helper disconnected"}`.
+The existing reason codes and schema version 1 are retained; category is an
+optional additive field. Missing or null category means **unclassified**, not
+recipe failure. Older runners, verification runs, and capture paths without a
+known classification omit it. In particular, `screenshot_failed` alone does not
+distinguish infrastructure from app/recipe behavior. Consumers should tolerate
+unknown categories and retain their own verdict/presentation policy.
+
+The category describes the primary reported failure, not every secondary cleanup
+error in the message. Concrete process/helper health failures take precedence
+over a step error; a bare deadline check does not erase that step's classified
+failure. Final helper checks preserve existing specific reasons such as
+`display_exited` and `early_exit`. `screenshots.json.failed_step_index` locates
+recipe-step failures; a null index can also indicate a final helper-check failure.
+Preflight and output failures that prevent result publication can still leave no
+`result.json`.
 
 Failures retain earlier captured screenshots in `screenshots`. If a complete
 candidate frame was captured, the list also includes `logs/last-candidate.png`,
@@ -399,6 +452,8 @@ on self-hosted runners. No Rust toolchain is required.
 | `output` | `artifacts/flatpak-smoke` | Output directory beneath the workspace. Existing artifacts require `args: --force`. |
 | `allow-network-remotes` | `false` | Set to `"true"` to download missing runtimes from Flathub. |
 | `args` | Empty | Extra CLI arguments, with quoted values and multiline input supported. |
+| `execution-timeout` | `900` | Docker execution budget in integer seconds (1–86400), including image pulls and CLI execution. |
+| `cleanup-timeout` | `30` | Additional shared stop/removal budget in integer seconds (1–86400). |
 | `image` | Version recorded in `action/image-version` | Override the mode-specific image with a local name, release tag, SHA tag, or digest. |
 | `user` | `root` | `root` or `nobody`. Use `nobody` for apps that reject root. |
 
@@ -425,6 +480,46 @@ wrapper sets it before invoking Docker, including when the CLI later fails.
 Input-validation failures happen earlier and do not produce output artifacts.
 The CLI exit status fails the step. Upload results in a separate
 `actions/upload-artifact` step with `if: always()`, as shown in the README.
+
+### Wrapper deadlines and diagnostics
+
+The CLI's `--overall-timeout` remains independent and should be shorter than
+`execution-timeout`, leaving time for image pulls and CLI result publication.
+For example, `args: --overall-timeout 5m`, `execution-timeout: '420'` and
+`cleanup-timeout: '30'` replace a consumer's GNU `timeout 420s` wrapper.
+Keep an outer process/job deadline longer than their sum (for example 480 seconds)
+to allow Python startup and artifact publication and protect against runner failure.
+
+The `execution` action output names `<output>.execution.json`, a **sibling** of
+the artifact directory so it remains host-writable while the container owns that
+directory. Upload this file alongside the artifact directory. It is atomically
+published before Docker starts and updated after cleanup. Reusing an output path
+replaces this wrapper record; use distinct output paths to retain execution history.
+The wrapper never modifies the CLI's `result.json`: consumers should retain its
+more-specific reason and also inspect wrapper/cleanup diagnostics.
+
+Schema version 1 records `container`, configured budgets, `exit_code`, `signal`,
+`elapsed_seconds` (including cleanup), and `status`: `running`, `completed`,
+`docker_start_failed`, `timeout`, or `cancelled`. `completed` means Docker returned,
+not that the CLI passed. Docker exit codes 125/126/127 indicate startup/command
+execution failure; ordinary CLI exit codes are passed through. Wrapper timeout
+returns 124; SIGTERM/SIGINT cancellation returns 130. Docker launch OS errors
+return 1 and include `error`; Docker's own launch messages remain in the step log.
+
+`cleanup` records `stop` (on cancellation/timeout) and `remove`, each with status
+`ok`, `absent`, `failed`, or `timeout`, plus exit code/stderr or OS error where
+available. Half the shared cleanup budget is reserved for graceful stop, allowing
+the CLI to publish cancellation artifacts and the container shell to restore
+ownership; remaining time is available for forced removal. Repeated TERM/INT is
+ignored during cleanup. Cleanup failures do not replace the original exit status
+or CLI result; consumers must check the cleanup record separately.
+
+SIGKILL, job/host termination, an unresponsive Docker daemon, or exhaustion of the
+grace period can prevent final diagnostics, ownership restoration, or removal.
+A surviving `running` record is incomplete evidence, not success. Forced removal
+cannot guarantee CLI artifacts or ownership; the early record's container name
+supports external diagnosis/removal. Invalid inputs or an unwritable record
+destination can fail before Docker starts with only stderr diagnostics.
 
 `args` uses shell-style quoting only. No shell commands, environment variables,
 globs, or command substitutions are evaluated. For example,

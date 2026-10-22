@@ -14,7 +14,9 @@ use crate::{
     installer::ArtifactInstaller,
     output::OutputLayout,
     process::{BoundedCommand, HealthCheck},
-    result::{Artifact, FailureReason, PhaseMetadata, RecipeMetadata, RunResult, Timings},
+    result::{
+        Artifact, FailureCategory, FailureReason, PhaseMetadata, RecipeMetadata, RunResult, Timings,
+    },
     session::AppBackend,
     tools,
 };
@@ -31,6 +33,7 @@ use std::{
 #[derive(Debug)]
 pub struct CaptureFailure {
     reason: FailureReason,
+    category: Option<FailureCategory>,
     message: String,
 }
 impl std::fmt::Display for CaptureFailure {
@@ -42,9 +45,35 @@ impl std::error::Error for CaptureFailure {}
 fn failure(reason: FailureReason, message: impl Into<String>) -> anyhow::Error {
     CaptureFailure {
         reason,
+        category: None,
         message: message.into(),
     }
     .into()
+}
+
+fn categorized_failure(
+    reason: FailureReason,
+    category: FailureCategory,
+    message: impl Into<String>,
+) -> anyhow::Error {
+    CaptureFailure {
+        reason,
+        category: Some(category),
+        message: message.into(),
+    }
+    .into()
+}
+
+fn infrastructure(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<CaptureFailure>().is_some() {
+        error
+    } else {
+        categorized_failure(
+            FailureReason::ScreenshotFailed,
+            FailureCategory::Infrastructure,
+            format!("{error:#}"),
+        )
+    }
 }
 
 enum Source {
@@ -88,6 +117,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>()
             ),
+            input_digest: None,
         }),
         ..PhaseMetadata::default()
     };
@@ -95,12 +125,19 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         recipe.validate_setup()?;
         check_dependencies(workflow::bounded(deadline, Duration::from_secs(5)))
             .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
-        let workspace = Rc::new(workspace::Workspace::prepare()?);
+        let mut workspace = workspace::Workspace::prepare()?;
+        if common.dependency_repo.is_some() {
+            crate::installer::isolate_system_installations(&workspace.home, &mut workspace.env)?;
+        }
+        let workspace = Rc::new(workspace);
         layout.append_runner_log(format!("capture workspace: {}", workspace.home.display()))?;
         let runner = workspace.installer_runner(&layout);
         let installer = ArtifactInstaller::new(&runner, deadline);
         let install_started = Instant::now();
         let installed = (|| {
+            installer
+                .add_dependency_repo(common.dependency_repo.as_deref())
+                .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
             installer
                 .add_flathub_if_allowed(common.allow_network_remotes)
                 .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
@@ -151,8 +188,18 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
                 missing.join(", ")
             );
         }
-        let launch_args =
-            workspace.prepare_app_data(&app_ref, &recipe, &common.recipe, deadline)?;
+        let prepared = workspace.prepare_app_data(
+            &app_ref,
+            &recipe,
+            &common.recipe,
+            &recipe_contents,
+            deadline,
+        )?;
+        phase_metadata
+            .recipe
+            .as_mut()
+            .expect("recipe metadata initialized")
+            .input_digest = Some(prepared.input_digest);
         let mut desktop = gnome::Gnome::start(
             workspace.clone(),
             &layout,
@@ -170,7 +217,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         let launch_started = Instant::now();
         desktop.launch(
             &app_ref,
-            &launch_args,
+            &prepared.launch_args,
             &layout,
             workflow::bounded(deadline, common.window_timeout),
         )?;
@@ -223,6 +270,11 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         ),
     };
     result.phase_metadata = phase_metadata;
+    if let (Some(failure), Err(error)) = (&mut result.failure, &outcome) {
+        failure.category = error
+            .downcast_ref::<CaptureFailure>()
+            .and_then(|error| error.category);
+    }
     manifest.write(&common.output.join("screenshots.json"))?;
     layout.write_result(&result)?;
     outcome

@@ -51,6 +51,7 @@ impl RunResult {
             screenshots,
             failure: Some(Failure {
                 reason,
+                category: None,
                 message: message.into(),
             }),
         }
@@ -78,6 +79,8 @@ pub struct InstalledRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecipeMetadata {
     pub content_hash: String,
+    #[serde(default)]
+    pub input_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,7 +129,16 @@ pub struct Timings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Failure {
     pub reason: FailureReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<FailureCategory>,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCategory {
+    Infrastructure,
+    Expectation,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +167,38 @@ mod tests {
 
         let json = serde_json::to_string(&FailureReason::AppErrorWindow).unwrap();
         assert_eq!(json, "\"app_error_window\"");
+    }
+
+    #[test]
+    fn failure_category_is_additive_and_optional() {
+        let old = serde_json::json!({"reason": "screenshot_failed", "message": "failed"});
+        let mut failure: Failure = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(failure.category, None);
+        assert_eq!(serde_json::to_value(&failure).unwrap(), old);
+        for (category, name) in [
+            (FailureCategory::Infrastructure, "infrastructure"),
+            (FailureCategory::Expectation, "expectation"),
+        ] {
+            failure.category = Some(category);
+            let value = serde_json::to_value(&failure).unwrap();
+            assert_eq!(value["category"], name);
+            assert_eq!(value["reason"], "screenshot_failed");
+            assert_eq!(serde_json::from_value::<Failure>(value).unwrap(), failure);
+        }
+    }
+
+    #[test]
+    fn recipe_metadata_accepts_legacy_results_and_round_trips_input_digest() {
+        let mut metadata: RecipeMetadata =
+            serde_json::from_str(r#"{"content_hash":"md5:legacy"}"#).unwrap();
+        assert_eq!(metadata.input_digest, None);
+        metadata.input_digest = Some(format!("v1:sha256:{}", "0".repeat(64)));
+        let value = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(value["content_hash"], "md5:legacy");
+        assert_eq!(
+            serde_json::from_value::<RecipeMetadata>(value).unwrap(),
+            metadata
+        );
     }
 
     #[test]
@@ -193,6 +237,7 @@ mod tests {
             }]),
             recipe: Some(RecipeMetadata {
                 content_hash: "md5:d41d8cd98f00b204e9800998ecf8427e".into(),
+                input_digest: None,
             }),
         };
         let value = serde_json::to_value(metadata).unwrap();

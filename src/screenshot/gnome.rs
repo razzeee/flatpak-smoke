@@ -1,13 +1,14 @@
 use super::{
     app_ref::AppRef,
+    categorized_failure,
     desktop::{Desktop, Input, Window},
-    failure,
+    failure, infrastructure,
     workspace::Workspace,
 };
 use crate::{
     output::OutputLayout,
     process::{BoundedCommand, HealthCheck, ManagedChild, remaining, sleep_before_checked},
-    result::FailureReason,
+    result::{FailureCategory, FailureReason},
     session::{AppBackend, ensure_x11_socket_directory},
 };
 use anyhow::{Context, ensure};
@@ -300,14 +301,16 @@ impl Gnome {
             .arg(millis.to_string())
             .output_before_checked(deadline, &self.health());
         self.check(deadline)?;
-        let output = output?;
-        ensure!(
-            output.status.success(),
-            "desktop helper failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        let response: Value =
-            serde_json::from_slice(&output.stdout).context("invalid desktop helper response")?;
+        let output = output.map_err(|error| infrastructure(error.into()))?;
+        if !output.status.success() {
+            return Err(infrastructure(anyhow::anyhow!(
+                "desktop helper failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let response: Value = serde_json::from_slice(&output.stdout)
+            .context("invalid desktop helper response")
+            .map_err(infrastructure)?;
         ensure!(
             response["ok"] == true,
             "desktop helper: {}",
@@ -370,8 +373,9 @@ fn check_processes(
     if let Some(path) = helper_ready
         && !path.is_file()
     {
-        return Err(failure(
+        return Err(categorized_failure(
             FailureReason::ScreenshotFailed,
+            FailureCategory::Infrastructure,
             "native capture helper disconnected",
         ));
     }
@@ -515,6 +519,36 @@ impl Drop for Gnome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnected_helper_is_infrastructure_even_after_deadline() {
+        let workspace = Workspace::prepare().unwrap();
+        let shell = RefCell::new(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn_managed()
+                .unwrap(),
+        );
+        let ready = workspace.home.join("helper-ready");
+        fs::write(&ready, b"ready").unwrap();
+        check_processes(
+            &shell,
+            None,
+            Some(&ready),
+            &workspace,
+            "",
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        fs::remove_file(&ready).unwrap();
+        let error = check_processes(&shell, None, Some(&ready), &workspace, "", Instant::now())
+            .unwrap_err();
+        let failure = error
+            .downcast_ref::<super::super::CaptureFailure>()
+            .unwrap();
+        assert_eq!(failure.reason, FailureReason::ScreenshotFailed);
+        assert_eq!(failure.category, Some(FailureCategory::Infrastructure));
+    }
 
     #[test]
     fn x11_connection_uses_reported_display_and_private_authority() {

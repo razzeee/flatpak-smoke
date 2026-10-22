@@ -55,6 +55,11 @@ jobs:
       - name: Check GNOME cursor exclusion contract
         run: node --test tests/gnome-capture.mjs
 
+      - name: Check reusable dependency transactions and concurrent readers
+        run: |
+          sudo apt-get install -y --no-install-recommends flatpak ostree
+          cargo test --lib local_dependencies_are_reusable_and_private -- --ignored
+
       - name: Check compatibility report validation
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/compatibility -p test_matrix.py
 
@@ -101,6 +106,13 @@ jobs:
           flatpak-builder --force-clean --user --install-deps-from=flathub --repo=target/x11-fixture-repo target/x11-fixture-build fixtures/minimal-x11/org.example.FlatpakSmokeX11Fixture.yml
           flatpak build-bundle target/x11-fixture-repo target/org.example.FlatpakSmokeX11Fixture.flatpak org.example.FlatpakSmokeX11Fixture
 
+      - name: Prepare frozen fixture runtime inputs
+        run: |
+          python3 action/prepare-dependencies.py --installation "$HOME/.local/share/flatpak" \
+            --output target/dependencies \
+            --ref runtime/org.gnome.Platform/x86_64/49 \
+            --ref runtime/org.freedesktop.Platform.GL.default/x86_64/25.08
+
       - name: Verify local fixture bundle
         uses: ./
         with:
@@ -117,7 +129,7 @@ jobs:
           app-ref: app/org.example.FlatpakSmokeFixture/x86_64/master
           image: flatpak-smoke
           output: target/fixture-repo-action
-          allow-network-remotes: 'true'
+          dependency-repo: target/dependencies
           user: nobody
           args: --overall-timeout 5m
 
@@ -156,6 +168,9 @@ jobs:
           done
           python3 -c 'import json; result = json.load(open("target/fixture-smoke-output/result.json")); assert "screenshots/001-after-click-click-me.png" in result["screenshots"], result'
 
+      - name: Cancel real action workloads and check removal and ownership
+        run: python3 tests/action_cancellation.py
+
       - name: Upload smoke outputs
         if: always()
         uses: actions/upload-artifact@v7
@@ -168,6 +183,9 @@ jobs:
             target/fixture-smoke-output/screenshots/**
             target/fixture-repo-action/**
             target/fixture-action-failure/**
+            target/*.execution.json
+            target/action-cancellation-*/**
+            target/action-cancellation-*.log
 
       - name: Verify readiness and exit fixture modes
         run: python3 tests/fixture_modes.py
@@ -273,6 +291,13 @@ jobs:
           docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
             -v "$PWD:/workspace" -w /workspace screenshot-tests python3 tests/screenshot_setup.py
 
+      - name: Prepare frozen screenshot runtime inputs
+        run: |
+          python3 action/prepare-dependencies.py --installation "$HOME/.local/share/flatpak" \
+            --output target/dependencies \
+            --ref runtime/org.gnome.Platform/x86_64/49 \
+            --ref runtime/org.freedesktop.Platform.GL.default/x86_64/25.08
+
       - name: Capture seeded bundle through the action
         uses: ./
         with:
@@ -281,7 +306,7 @@ jobs:
           recipe: fixtures/screenshot/seeded.yml
           output: target/screenshot-action-bundle
           image: screenshot-production
-          allow-network-remotes: 'true'
+          dependency-repo: target/dependencies
 
       - name: Capture seeded repository through the action as non-root
         uses: ./
@@ -293,7 +318,7 @@ jobs:
           output: target/screenshot-action-repo
           image: screenshot-tests
           user: nobody
-          allow-network-remotes: 'true'
+          dependency-repo: target/dependencies
 
       - name: Replace non-root action output
         uses: ./
@@ -305,7 +330,7 @@ jobs:
           output: target/screenshot-action-repo
           image: screenshot-tests
           user: nobody
-          allow-network-remotes: 'true'
+          dependency-repo: target/dependencies
           args: --force
 
       - name: Check recipe failures and fresh profiles

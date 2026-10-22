@@ -1,7 +1,9 @@
 use super::{
+    categorized_failure,
     desktop::{Desktop, Input, Window},
     failure,
     images::Images,
+    infrastructure,
     manifest::{Capture, Manifest},
     recipe::{Action, Recipe, Step},
     snapshot::{self, CaptureSnapshot},
@@ -10,7 +12,7 @@ use crate::{
     analysis::FrameObservation,
     output::OutputLayout,
     process::{remaining, sleep_before_checked},
-    result::FailureReason,
+    result::{FailureCategory, FailureReason},
 };
 use anyhow::{Context, ensure};
 use std::{
@@ -35,8 +37,9 @@ pub struct Workflow<'a> {
 impl Workflow<'_> {
     pub fn initialize(&self, recipe: &Recipe, deadline: Instant) -> anyhow::Result<u64> {
         let result = self.initialize_window(recipe, deadline);
-        self.desktop.check(deadline).and(result).map_err(|error| {
-            if Instant::now() >= deadline {
+        finish_check(result, self.desktop.check(deadline)).map_err(|error| {
+            if Instant::now() >= deadline && error.downcast_ref::<super::CaptureFailure>().is_none()
+            {
                 failure(
                     FailureReason::WindowTimeout,
                     format!("initial window did not become ready: {error:#}"),
@@ -78,7 +81,8 @@ impl Workflow<'_> {
             }
         }
         let snapshot = self.observe(window.id, deadline).map_err(|error| {
-            if Instant::now() >= deadline {
+            if Instant::now() >= deadline && error.downcast_ref::<super::CaptureFailure>().is_none()
+            {
                 failure(
                     FailureReason::WindowTimeout,
                     format!("window did not become ready: {error:#}"),
@@ -106,7 +110,7 @@ impl Workflow<'_> {
             let result = self
                 .step(step, &mut selected, deadline, manifest)
                 .with_context(|| format!("recipe step {index}"));
-            self.desktop.check(deadline).and(result).map_err(|error| {
+            finish_check(result, self.desktop.check(deadline)).map_err(|error| {
                 if error.downcast_ref::<super::CaptureFailure>().is_some() {
                     error
                 } else {
@@ -118,12 +122,8 @@ impl Workflow<'_> {
         remaining(self.overall)?;
         self.desktop
             .windows(bounded(self.overall, Duration::from_secs(1)))
-            .map_err(|error| {
-                failure(
-                    FailureReason::ScreenshotFailed,
-                    format!("final helper check: {error:#}"),
-                )
-            })?;
+            .context("final helper check")
+            .map_err(infrastructure)?;
         self.desktop.check(self.overall)
     }
 
@@ -145,7 +145,9 @@ impl Workflow<'_> {
                 self.with_snapshot(snapshot, |snapshot| {
                     let filename = format!("{:03}-{}.png", manifest.captures.len(), capture.name);
                     let path = self.layout.screenshot_path(&filename);
-                    fs::copy(snapshot.path(), &path)?;
+                    fs::copy(snapshot.path(), &path)
+                        .context("publishing recipe screenshot")
+                        .map_err(infrastructure)?;
                     manifest.captures.push(Capture {
                         name: capture.name.clone(),
                         path: self.layout.relative_screenshot_path(&filename),
@@ -166,11 +168,16 @@ impl Workflow<'_> {
                     let matches = self.images.matches(&tsv, label);
                     self.layout
                         .append_runner_log(format!("click candidates: {matches:?}"))?;
-                    ensure!(
-                        matches.len() == 1,
-                        "click text '{label}' matched {} locations; expected exactly one",
-                        matches.len()
-                    );
+                    if matches.len() != 1 {
+                        return Err(categorized_failure(
+                            FailureReason::ScreenshotFailed,
+                            FailureCategory::Expectation,
+                            format!(
+                                "click text '{label}' matched {} locations; expected exactly one",
+                                matches.len()
+                            ),
+                        ));
+                    }
                     let (x, y) = matches[0];
                     let window = snapshot.window();
                     ensure!(
@@ -228,8 +235,12 @@ impl Workflow<'_> {
             }
             sleep_before_checked(Duration::from_millis(100), deadline, &self.desktop.health())
                 .map_err(|error| {
-                    failure(
+                    if error.kind() != std::io::ErrorKind::TimedOut {
+                        return error.into();
+                    }
+                    categorized_failure(
                         FailureReason::WindowTimeout,
+                        FailureCategory::Expectation,
                         format!("waiting for app window {title:?}: {error}"),
                     )
                 })?;
@@ -269,6 +280,15 @@ impl Workflow<'_> {
     }
 }
 
+// Concrete liveness failures take precedence. A bare deadline check must not
+// erase the more informative failure that caused a step to stop.
+fn finish_check<T>(result: anyhow::Result<T>, check: anyhow::Result<()>) -> anyhow::Result<T> {
+    match check {
+        Err(error) if error.downcast_ref::<super::CaptureFailure>().is_some() => Err(error),
+        check => result.and_then(|value| check.map(|()| value)),
+    }
+}
+
 fn finish_snapshot<T>(
     use_result: anyhow::Result<T>,
     cleanup_result: anyhow::Result<()>,
@@ -301,7 +321,11 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    struct FakeDesktop(Window, Option<std::path::PathBuf>);
+    struct FakeDesktop(
+        Window,
+        Option<std::path::PathBuf>,
+        Option<fn() -> anyhow::Error>,
+    );
 
     impl Desktop for FakeDesktop {
         fn version(&self) -> &str {
@@ -314,6 +338,9 @@ mod tests {
             Ok(())
         }
         fn windows(&self, _deadline: Instant) -> anyhow::Result<Vec<Window>> {
+            if let Some(error) = self.2 {
+                return Err(error());
+            }
             Ok(vec![self.0.clone()])
         }
         fn resize(
@@ -409,7 +436,7 @@ mod tests {
             assert!(convert.arg(&fixture).status().unwrap().success());
             let layout =
                 crate::output::OutputLayout::prepare(&root.path().join("output"), false).unwrap();
-            let desktop = FakeDesktop(window(), Some(fixture.clone()));
+            let desktop = FakeDesktop(window(), Some(fixture.clone()), None);
             let workspace = Workspace::prepare().unwrap();
             let workflow = workflow(&desktop, &workspace, &layout);
             let recipe: Recipe = serde_yaml_ng::from_str(
@@ -454,6 +481,179 @@ mod tests {
     }
 
     #[test]
+    fn health_check_does_not_erase_classification_with_bare_timeout() {
+        use crate::{
+            result::{FailureCategory, FailureReason},
+            screenshot::{CaptureFailure, categorized_failure},
+        };
+        for category in [
+            FailureCategory::Infrastructure,
+            FailureCategory::Expectation,
+        ] {
+            let primary =
+                categorized_failure(FailureReason::ScreenshotFailed, category, "primary failure");
+            let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "deadline elapsed");
+            let error = super::finish_check::<()>(Err(primary), Err(timeout.into())).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<CaptureFailure>().unwrap().category,
+                Some(category)
+            );
+        }
+        let primary = categorized_failure(
+            FailureReason::WindowTimeout,
+            FailureCategory::Expectation,
+            "missing target",
+        );
+        let health = categorized_failure(
+            FailureReason::ScreenshotFailed,
+            FailureCategory::Infrastructure,
+            "helper disconnected",
+        );
+        let error = super::finish_check::<()>(Err(primary), Err(health)).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CaptureFailure>().unwrap().category,
+            Some(FailureCategory::Infrastructure)
+        );
+    }
+
+    #[test]
+    fn missing_recipe_window_is_an_expectation_failure() {
+        use crate::{
+            result::{FailureCategory, FailureReason},
+            screenshot::{CaptureFailure, manifest::Manifest, recipe::Recipe},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let layout = crate::output::OutputLayout::prepare(root.path(), false).unwrap();
+        let desktop = FakeDesktop(window(), None, None);
+        let workspace = Workspace::prepare().unwrap();
+        let workflow = workflow(&desktop, &workspace, &layout);
+        let recipe: Recipe = serde_yaml_ng::from_str(
+            "version: 1\nsteps:\n  - select_window:\n      title: Missing\n",
+        )
+        .unwrap();
+        let mut manifest = Manifest::new();
+        let error = workflow
+            .execute(&recipe, 9, Duration::from_millis(5), &mut manifest)
+            .unwrap_err();
+        let failure = error.downcast_ref::<CaptureFailure>().unwrap();
+        assert_eq!(failure.reason, FailureReason::WindowTimeout);
+        assert_eq!(failure.category, Some(FailureCategory::Expectation));
+        assert_eq!(manifest.failed_step_index, Some(0));
+    }
+
+    #[test]
+    fn final_helper_check_preserves_specific_reason() {
+        use crate::{
+            result::FailureReason,
+            screenshot::{CaptureFailure, manifest::Manifest, recipe::Recipe},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let layout = crate::output::OutputLayout::prepare(root.path(), false).unwrap();
+        let desktop = FakeDesktop(
+            window(),
+            None,
+            Some(|| crate::screenshot::failure(FailureReason::DisplayExited, "desktop failed")),
+        );
+        let workspace = Workspace::prepare().unwrap();
+        let workflow = workflow(&desktop, &workspace, &layout);
+        let recipe: Recipe =
+            serde_yaml_ng::from_str("version: 1\nsteps:\n  - type_text: hello\n").unwrap();
+        let mut manifest = Manifest::new();
+        let error = workflow
+            .execute(&recipe, 9, Duration::from_secs(1), &mut manifest)
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CaptureFailure>().unwrap().reason,
+            FailureReason::DisplayExited
+        );
+        assert!(format!("{error:#}").contains("final helper check"));
+        assert_eq!(manifest.failed_step_index, None);
+    }
+
+    #[test]
+    fn helper_transport_failure_is_infrastructure_during_step_and_final_check() {
+        use crate::{
+            result::{FailureCategory, FailureReason},
+            screenshot::{CaptureFailure, manifest::Manifest, recipe::Recipe},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let layout = crate::output::OutputLayout::prepare(root.path(), false).unwrap();
+        let workspace = Workspace::prepare().unwrap();
+        for (step, failed_index) in [
+            ("select_window:\n      title: Main", Some(0)),
+            ("type_text: hello", None),
+        ] {
+            let desktop = FakeDesktop(
+                window(),
+                None,
+                Some(|| {
+                    crate::screenshot::infrastructure(anyhow::anyhow!(
+                        "helper transport disconnected"
+                    ))
+                }),
+            );
+            let workflow = workflow(&desktop, &workspace, &layout);
+            let recipe: Recipe =
+                serde_yaml_ng::from_str(&format!("version: 1\nsteps:\n  - {step}\n")).unwrap();
+            let mut manifest = Manifest::new();
+            let error = workflow
+                .execute(&recipe, 9, Duration::from_secs(1), &mut manifest)
+                .unwrap_err();
+            let failure = error.downcast_ref::<CaptureFailure>().unwrap();
+            assert_eq!(failure.reason, FailureReason::ScreenshotFailed);
+            assert_eq!(failure.category, Some(FailureCategory::Infrastructure));
+            assert_eq!(manifest.failed_step_index, failed_index);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ImageMagick"]
+    fn publication_output_copy_failure_is_infrastructure() {
+        use crate::{
+            result::{FailureCategory, FailureReason},
+            screenshot::{CaptureFailure, manifest::Manifest, recipe::Recipe},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let fixture = root.path().join("fixture.png");
+        assert!(
+            std::process::Command::new("convert")
+                .args([
+                    "-size",
+                    "900x600",
+                    "xc:black",
+                    "-fill",
+                    "white",
+                    "-draw",
+                    "rectangle 200,250 400,270"
+                ])
+                .arg(&fixture)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let layout =
+            crate::output::OutputLayout::prepare(&root.path().join("output"), false).unwrap();
+        fs::create_dir(layout.screenshot_path("000-main.png")).unwrap();
+        let desktop = FakeDesktop(window(), Some(fixture), None);
+        let workspace = Workspace::prepare().unwrap();
+        let workflow = workflow(&desktop, &workspace, &layout);
+        let recipe: Recipe = serde_yaml_ng::from_str(
+            "version: 1\nsteps:\n  - capture:\n      name: main\n      caption: Main view\n",
+        )
+        .unwrap();
+        let mut manifest = Manifest::new();
+        let error = workflow
+            .execute(&recipe, 9, Duration::from_secs(2), &mut manifest)
+            .unwrap_err();
+        let failure = error.downcast_ref::<CaptureFailure>().unwrap();
+        assert_eq!(failure.reason, FailureReason::ScreenshotFailed);
+        assert_eq!(failure.category, Some(FailureCategory::Infrastructure));
+        assert!(format!("{error:#}").contains("publishing recipe screenshot"));
+        assert!(manifest.captures.is_empty());
+        assert_eq!(manifest.failed_step_index, Some(0));
+    }
+
+    #[test]
     fn finish_snapshot_preserves_primary_error() {
         let result: anyhow::Result<()> = Err(anyhow::anyhow!("action failed"));
         let cleanup = Err(anyhow::anyhow!("cleanup failed"));
@@ -474,7 +674,7 @@ mod tests {
     fn with_snapshot_passes_stable_path_to_consumer() {
         let root = tempfile::tempdir().unwrap();
         let layout = crate::output::OutputLayout::prepare(root.path(), false).unwrap();
-        let desktop = FakeDesktop(window(), None);
+        let desktop = FakeDesktop(window(), None, None);
         let workspace = Workspace::prepare().unwrap();
         let workflow = workflow(&desktop, &workspace, &layout);
         let snapshot = capture_with_inspector(
