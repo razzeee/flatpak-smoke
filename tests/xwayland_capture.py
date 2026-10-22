@@ -26,9 +26,13 @@ def main():
     assert not Path("/tmp/.X11-unix").exists(), "run in a fresh container to test missing socket-directory setup"
     args.output.mkdir(parents=True, exist_ok=False)
     recipe = args.output / "recipe.json"
+    # Sending input does not wait for GTK to process it and redraw. Require the
+    # resulting state before capturing, especially when two sessions compete
+    # for CPU. The final image must still independently pass the OCR assertion.
     recipe.write_text(json.dumps({"version": 1, "window": {"width": 600, "height": 400},
                                   "steps": [{"capture": {"name": "before", "caption": "Before clicking"}},
                                             {"key": "space"},
+                                            {"wait_text": "flatpak-smoke fixture clicked"},
                                             {"capture": {"name": "after", "caption": "After clicking"}}]}))
 
     def run(name, x11):

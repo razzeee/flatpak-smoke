@@ -137,3 +137,12 @@ environment setting; production driver selection and real-app tests are
 unchanged. There are no retries or relaxed assertions. Local end-to-end validation
 passed all seven cases: native Wayland, X11, both concurrent X11 runs,
 exit-after-click, cancellation and injected readiness failure.
+
+The next run, [39863108178](https://github.com/razzeee/flatpak-smoke/actions/runs/39863108178),
+exposed an independent capture-fixture synchronization gap: one concurrent
+GNOME/Xwayland run captured the unchanged "Click Me" button immediately after
+sending Space. Its recipe did not wait for the resulting application state.
+`tests/xwayland_capture.py` now requires `wait_text: flatpak-smoke fixture clicked`
+before the final capture, while retaining the independent final-image OCR check.
+Input is sent once; a missing response fails the existing bounded wait rather
+than publishing the old state as the expected "after" capture.
