@@ -39,7 +39,8 @@ input, capture, recipe steps, or runs. Existing caller deadlines still bound the
 helper RPC. Window disappearance and desktop modal checks remain failures.
 
 Focus must still equal the exact selected window. A visible application-modal
-window also blocks its transient parent; an unparented modal blocks another
+window also blocks its transient ancestors, including through non-modal
+intermediate dialogs; an unparented modal blocks another
 window with the same nonempty sandbox app ID, except its own transient
 descendants (including nested dialogs). This matters for VLC: X11 can
 temporarily grant focus to its main window even while Qt's application modal

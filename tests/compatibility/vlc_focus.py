@@ -11,6 +11,7 @@ from matrix import invoke, validate_run
 
 
 def run():
+    """Verify fresh-profile modal rejection and configured VLC capture in separate runs."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

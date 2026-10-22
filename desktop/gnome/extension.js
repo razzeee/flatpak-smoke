@@ -134,14 +134,18 @@ export default class Capture extends Extension {
         const appId = window.get_sandboxed_app_id();
         // A modal can open another dialog. Its own transient descendants are
         // valid targets, even when the modal itself has no transient parent.
-        const ancestors = new Set([window]);
-        for (let parent = window.get_transient_for(); parent && !ancestors.has(parent);
-            parent = parent.get_transient_for())
-            ancestors.add(parent);
+        const ancestry = window => {
+            const chain = new Set();
+            for (let current = window; current && !chain.has(current);
+                current = current.get_transient_for())
+                chain.add(current);
+            return chain;
+        };
+        const ancestors = ancestry(window);
         const modal = this._windows().find(candidate => candidate !== window &&
             candidate.get_window_type() === Meta.WindowType.MODAL_DIALOG &&
             !candidate.is_hidden() &&
-            (candidate.get_transient_for() === window ||
+            (ancestry(candidate).has(window) ||
                 (candidate.get_transient_for() === null && !ancestors.has(candidate) && appId &&
                     candidate.get_sandboxed_app_id() === appId)));
         if (modal)

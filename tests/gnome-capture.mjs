@@ -100,6 +100,41 @@ test('an unparented modal permits its focused transient descendants but blocks u
     assert.equal(pressed, 1, 'blocked parents and unrelated windows must not receive input');
 });
 
+test('a nested modal blocks ancestors through a non-modal dialog', async () => {
+    const appId = 'org.example.App';
+    const makeWindow = (id, parent, type) => ({
+        get_stable_sequence: () => id, get_title: () => `Window ${id}`,
+        get_sandboxed_app_id: () => appId, get_pid: () => 100,
+        get_transient_for: () => parent, get_window_type: () => type,
+        is_hidden: () => false, minimized: false, activate() {},
+    });
+    const main = makeWindow(1, null, 0);
+    const dialog = makeWindow(2, main, 3);
+    const modal = makeWindow(3, dialog, 4);
+    const display = {focus_window: main};
+    const context = vm.createContext({
+        Extension: class {}, Meta: {WindowType: {MODAL_DIALOG: 4}},
+        GLib: {get_monotonic_time: () => 0},
+        Main: {overview: {hide() {}}, modalCount: 0},
+        global: {get_current_time: () => 0, display},
+    });
+    const extension = vm.runInContext(`${source}\nnew Capture()`, context);
+    extension._windows = () => [main, dialog, modal];
+    extension._info = window => ({id: window.get_stable_sequence()});
+    let dispatched = false;
+    extension._chord = async () => { dispatched = true; };
+    for (const window of [main, dialog]) {
+        display.focus_window = window;
+        for (const action of ['key', 'capture']) {
+            await assert.rejects(extension._call({action, window: window.get_stable_sequence(), app_id: appId}),
+                /application modal/);
+        }
+    }
+    assert.equal(dispatched, false);
+    display.focus_window = modal;
+    assert.deepEqual(await extension._call({action: 'focus', window: 3, app_id: appId}), {id: 3});
+});
+
 test('focus timeout and window disappearance cannot dispatch input', async () => {
     for (const disappears of [false, true]) {
         let time = 0;
