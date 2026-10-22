@@ -8,6 +8,8 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
+import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
@@ -77,27 +79,107 @@ def command(inputs, workspace):
     return docker, output, name
 
 
+def seconds(inputs, key, default):
+    value = inputs.get(key) or str(default)
+    if not re.fullmatch(r"[0-9]+", value) or not 1 <= int(value) <= 86400:
+        raise ValueError(f"{key} must be an integer number of seconds from 1 to 86400")
+    return int(value)
+
+
+def write_record(path, record):
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(json.dumps(record, indent=2) + "\n")
+            stream.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def cleanup(name, budget, interrupted):
+    deadline = time.monotonic() + budget
+    results = {}
+    commands = []
+    if interrupted:
+        # Reserve half the shared budget for forced removal if graceful stop hangs.
+        commands.append(("stop", ["docker", "stop", "--time", str(max(1, budget // 2 - 1)), name], budget / 2))
+    commands.append(("remove", ["docker", "rm", "-f", name], budget))
+    for stage, command, limit in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, check=False,
+                                    start_new_session=True,
+                                    timeout=max(.001, min(limit, deadline - time.monotonic())))
+            absent = "No such container" in result.stderr
+            results[stage] = {"status": "absent" if absent else "ok" if result.returncode == 0 else "failed",
+                              "exit_code": result.returncode, "stderr": result.stderr[-4096:]}
+        except subprocess.TimeoutExpired:
+            results[stage] = {"status": "timeout"}
+        except OSError as error:
+            results[stage] = {"status": "failed", "error": str(error)}
+    return results
+
+
 def main():
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64"):
         raise ValueError("the action requires a Linux amd64 runner with Docker")
     inputs = json.loads(os.environ["FLATPAK_SMOKE_INPUTS"])
     workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
     docker, output, name = command(inputs, workspace)
+    execution_timeout = seconds(inputs, "execution-timeout", 900)
+    cleanup_timeout = seconds(inputs, "cleanup-timeout", 30)
     # Create parent directories as the host user so checkout cleanup can remove them.
     (workspace / output).mkdir(parents=True, exist_ok=True)
+    # A sibling stays host-writable even while container.sh gives output to nobody.
+    record_path = workspace / (output + ".execution.json")
+    record = {"schema_version": 1, "container": name, "status": "running",
+              "execution_timeout_seconds": execution_timeout,
+              "cleanup_timeout_seconds": cleanup_timeout, "exit_code": None,
+              "signal": None, "cleanup": None}
+    write_record(record_path, record)
     with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
-        stream.write(f"output={output}\n")
-    def cancel(_signal, _frame):
+        stream.write(f"output={output}\nexecution={output}.execution.json\n")
+    def cancel(signum, _frame):
+        record["signal"] = signum
         raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, cancel)
+    previous = {sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)}
+    started = time.monotonic()
     try:
-        return subprocess.run(docker, check=False).returncode
-    finally:
         try:
-            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, check=False, timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            print(f"flatpak-smoke action: container cleanup failed: {error}", file=sys.stderr)
+            code = subprocess.run(docker, check=False, timeout=execution_timeout,
+                                  start_new_session=True).returncode
+            record["status"] = "docker_start_failed" if code in (125, 126, 127) else "completed"
+        except subprocess.TimeoutExpired:
+            record["status"] = "timeout"
+            code = 124
+        except KeyboardInterrupt:
+            record["status"] = "cancelled"
+            code = 130
+        except OSError as error:
+            record.update(status="docker_start_failed", error=str(error))
+            code = 1
+        record["exit_code"] = code
+    finally:
+        # Repeated TERM/INT must not interrupt the bounded finally cleanup.
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        try:
+            record["cleanup"] = cleanup(name, cleanup_timeout, record["status"] in ("timeout", "cancelled"))
+            for stage, result in record["cleanup"].items():
+                if result["status"] in ("failed", "timeout"):
+                    print(f"flatpak-smoke action: container cleanup {stage}: {json.dumps(result)}",
+                          file=sys.stderr)
+            record["elapsed_seconds"] = round(time.monotonic() - started, 3)
+            try:
+                write_record(record_path, record)
+            except OSError as error:
+                print(f"flatpak-smoke action: execution record failed: {error}", file=sys.stderr)
+                if code == 0:
+                    code = 1
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+    return code
 
 
 if __name__ == "__main__":

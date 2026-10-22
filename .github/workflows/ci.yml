@@ -156,6 +156,9 @@ jobs:
           done
           python3 -c 'import json; result = json.load(open("target/fixture-smoke-output/result.json")); assert "screenshots/001-after-click-click-me.png" in result["screenshots"], result'
 
+      - name: Cancel real action workloads and check removal and ownership
+        run: python3 tests/action_cancellation.py
+
       - name: Upload smoke outputs
         if: always()
         uses: actions/upload-artifact@v7
@@ -168,6 +171,9 @@ jobs:
             target/fixture-smoke-output/screenshots/**
             target/fixture-repo-action/**
             target/fixture-action-failure/**
+            target/*.execution.json
+            target/action-cancellation-*/**
+            target/action-cancellation-*.log
 
       - name: Verify readiness and exit fixture modes
         run: python3 tests/fixture_modes.py

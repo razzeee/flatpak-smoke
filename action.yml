@@ -21,12 +21,21 @@ inputs:
     default: 'false'
   args:
     description: Additional CLI arguments, supporting quoted values without shell expansion
+  execution-timeout:
+    description: Maximum Docker execution seconds, including image pull (1-86400)
+    default: '900'
+  cleanup-timeout:
+    description: Additional shared graceful-stop and removal budget in seconds (1-86400)
+    default: '30'
   image:
     description: Override the versioned image, for example with an image digest
   user:
     description: Run the application as root or nobody
     default: root
 outputs:
+  execution:
+    description: Workspace-relative wrapper execution JSON (separate from CLI result)
+    value: ${{ steps.run.outputs.execution }}
   output:
     description: Workspace-relative output directory, also set when the CLI fails
     value: ${{ steps.run.outputs.output }}

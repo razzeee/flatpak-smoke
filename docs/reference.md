@@ -399,6 +399,8 @@ on self-hosted runners. No Rust toolchain is required.
 | `output` | `artifacts/flatpak-smoke` | Output directory beneath the workspace. Existing artifacts require `args: --force`. |
 | `allow-network-remotes` | `false` | Set to `"true"` to download missing runtimes from Flathub. |
 | `args` | Empty | Extra CLI arguments, with quoted values and multiline input supported. |
+| `execution-timeout` | `900` | Docker execution budget in integer seconds (1–86400), including image pulls and CLI execution. |
+| `cleanup-timeout` | `30` | Additional shared stop/removal budget in integer seconds (1–86400). |
 | `image` | Version recorded in `action/image-version` | Override the mode-specific image with a local name, release tag, SHA tag, or digest. |
 | `user` | `root` | `root` or `nobody`. Use `nobody` for apps that reject root. |
 
@@ -425,6 +427,46 @@ wrapper sets it before invoking Docker, including when the CLI later fails.
 Input-validation failures happen earlier and do not produce output artifacts.
 The CLI exit status fails the step. Upload results in a separate
 `actions/upload-artifact` step with `if: always()`, as shown in the README.
+
+### Wrapper deadlines and diagnostics
+
+The CLI's `--overall-timeout` remains independent and should be shorter than
+`execution-timeout`, leaving time for image pulls and CLI result publication.
+For example, `args: --overall-timeout 5m`, `execution-timeout: '420'` and
+`cleanup-timeout: '30'` replace a consumer's GNU `timeout 420s` wrapper.
+Keep an outer process/job deadline longer than their sum (for example 480 seconds)
+to allow Python startup and artifact publication and protect against runner failure.
+
+The `execution` action output names `<output>.execution.json`, a **sibling** of
+the artifact directory so it remains host-writable while the container owns that
+directory. Upload this file alongside the artifact directory. It is atomically
+published before Docker starts and updated after cleanup. Reusing an output path
+replaces this wrapper record; use distinct output paths to retain execution history.
+The wrapper never modifies the CLI's `result.json`: consumers should retain its
+more-specific reason and also inspect wrapper/cleanup diagnostics.
+
+Schema version 1 records `container`, configured budgets, `exit_code`, `signal`,
+`elapsed_seconds` (including cleanup), and `status`: `running`, `completed`,
+`docker_start_failed`, `timeout`, or `cancelled`. `completed` means Docker returned,
+not that the CLI passed. Docker exit codes 125/126/127 indicate startup/command
+execution failure; ordinary CLI exit codes are passed through. Wrapper timeout
+returns 124; SIGTERM/SIGINT cancellation returns 130. Docker launch OS errors
+return 1 and include `error`; Docker's own launch messages remain in the step log.
+
+`cleanup` records `stop` (on cancellation/timeout) and `remove`, each with status
+`ok`, `absent`, `failed`, or `timeout`, plus exit code/stderr or OS error where
+available. Half the shared cleanup budget is reserved for graceful stop, allowing
+the CLI to publish cancellation artifacts and the container shell to restore
+ownership; remaining time is available for forced removal. Repeated TERM/INT is
+ignored during cleanup. Cleanup failures do not replace the original exit status
+or CLI result; consumers must check the cleanup record separately.
+
+SIGKILL, job/host termination, an unresponsive Docker daemon, or exhaustion of the
+grace period can prevent final diagnostics, ownership restoration, or removal.
+A surviving `running` record is incomplete evidence, not success. Forced removal
+cannot guarantee CLI artifacts or ownership; the early record's container name
+supports external diagnosis/removal. Invalid inputs or an unwritable record
+destination can fail before Docker starts with only stderr diagnostics.
 
 `args` uses shell-style quoting only. No shell commands, environment variables,
 globs, or command substitutions are evaluated. For example,
