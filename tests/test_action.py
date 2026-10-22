@@ -5,8 +5,10 @@ import io
 import os
 from pathlib import Path
 import runpy
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -21,9 +23,10 @@ class ActionTests(unittest.TestCase):
         self.bin = self.workspace / "bin"
         self.bin.mkdir()
         docker = self.bin / "docker"
-        docker.write_text("#!/usr/bin/env python3\nimport json, os, sys\n"
+        docker.write_text("#!/usr/bin/env python3\nimport json, os, sys, time\n"
                           "if sys.argv[1] == 'run':\n"
                           "    open(os.environ['DOCKER_RECORD'], 'w').write(json.dumps(sys.argv[1:]))\n"
+                          "    time.sleep(float(os.environ.get('DOCKER_SLEEP', '0')))\n"
                           "    sys.exit(int(os.environ.get('DOCKER_EXIT', '0')))\n")
         docker.chmod(0o755)
         (self.workspace / "app bundle.flatpak").touch()
@@ -48,7 +51,8 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(command[command.index("flatpak-smoke") + 1:], [
             "verify-bundle", "app bundle.flatpak", "--output", "artifacts/flatpak-smoke",
             "--allow-network-remotes", "--screenshot-after-click", "Log In", "--overall-timeout", "5m"])
-        self.assertEqual((self.workspace / "outputs").read_text(), "output=artifacts/flatpak-smoke\n")
+        self.assertEqual((self.workspace / "outputs").read_text(),
+                         "output=artifacts/flatpak-smoke\nexecution=artifacts/flatpak-smoke.execution.json\n")
         self.assertTrue((self.workspace / "artifacts/flatpak-smoke").is_dir())
         self.assertEqual((self.workspace / "artifacts").stat().st_uid, os.getuid())
 
@@ -97,6 +101,8 @@ class ActionTests(unittest.TestCase):
             {"allow-network-remotes": "yes"}, {"bundle": "missing.flatpak"},
             {"args": "--output=elsewhere"}, {"args": "--recipe other.yml"},
             {"args": "--allow-network-remotes"}, {"args": '"unclosed'},
+            {"execution-timeout": "0"}, {"execution-timeout": "5m"},
+            {"cleanup-timeout": "-1"}, {"cleanup-timeout": "86401"},
         ]:
             with self.subTest(changes=changes):
                 result = self.run_action({"bundle": "app bundle.flatpak", **changes})
@@ -123,16 +129,93 @@ class ActionTests(unittest.TestCase):
                     with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(stderr), \
                             mock.patch("subprocess.run", side_effect=[run_result, cleanup_error]), \
                             mock.patch("signal.signal"):
-                        if isinstance(outcome, Exception):
-                            with self.assertRaises(OSError) as raised:
-                                action["main"]()
-                            self.assertIs(raised.exception, launch_error)
-                        else:
-                            self.assertEqual(action["main"](), outcome)
-                    self.assertIn("container cleanup failed", stderr.getvalue())
+                        self.assertEqual(action["main"](), 1 if isinstance(outcome, Exception) else outcome)
+                    record = json.loads((self.workspace / "artifacts/flatpak-smoke.execution.json").read_text())
+                    self.assertIn(record["cleanup"]["remove"]["status"], ("failed", "timeout"))
+                    if isinstance(outcome, Exception):
+                        self.assertEqual(record["error"], "original launch failure")
+
+    def test_timeout_and_cancellation_preserve_cli_result_and_bound_cleanup(self):
+        action = runpy.run_path(str(ROOT / "action/run.py"))
+        output = self.workspace / "artifacts/flatpak-smoke"
+        output.mkdir(parents=True)
+        result = output / "result.json"
+        result.write_text('{"reason":"specific_cli_failure"}')
+        env = {"GITHUB_WORKSPACE": str(self.workspace),
+               "GITHUB_OUTPUT": str(self.workspace / "outputs"),
+               "FLATPAK_SMOKE_INPUTS": json.dumps({"bundle": "app bundle.flatpak",
+                                                   "execution-timeout": "420", "cleanup-timeout": "30"})}
+        for error, status, code in [(subprocess.TimeoutExpired("docker", 420), "timeout", 124),
+                                    (KeyboardInterrupt(), "cancelled", 130)]:
+            with self.subTest(status=status), mock.patch.dict(os.environ, env), \
+                    mock.patch("signal.signal"), mock.patch("subprocess.run", side_effect=[
+                        error, subprocess.TimeoutExpired("stop", 15),
+                        subprocess.CompletedProcess([], 0, "", "")]) as run:
+                self.assertEqual(action["main"](), code)
+                self.assertEqual(run.call_args_list[0].kwargs["timeout"], 420)
+                self.assertLessEqual(run.call_args_list[1].kwargs["timeout"], 15)
+                self.assertLessEqual(run.call_args_list[2].kwargs["timeout"], 30)
+            record = json.loads(output.with_suffix(".execution.json").read_text())
+            self.assertEqual(record["status"], status)
+            self.assertEqual(record["cleanup"]["stop"]["status"], "timeout")
+            self.assertEqual(record["cleanup"]["remove"]["status"], "ok")
+            self.assertEqual(result.read_text(), '{"reason":"specific_cli_failure"}')
+
+    def test_docker_start_failure_is_distinct_from_cli_failure(self):
+        for code, status in [(125, "docker_start_failed"), (126, "docker_start_failed"),
+                             (127, "docker_start_failed"), (1, "completed")]:
+            self.assertEqual(self.run_action({"bundle": "app bundle.flatpak"}, code).returncode, code)
+            record = json.loads((self.workspace / "artifacts/flatpak-smoke.execution.json").read_text())
+            self.assertEqual(record["status"], status)
+
+    def test_execution_deadline_terminates_real_docker_client_process(self):
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {"DOCKER_SLEEP": "30"}):
+            result = self.run_action({"bundle": "app bundle.flatpak", "execution-timeout": "1"})
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertLess(time.monotonic() - started, 5)
+        record = json.loads((self.workspace / "artifacts/flatpak-smoke.execution.json").read_text())
+        self.assertEqual(record["status"], "timeout")
+        self.assertEqual(record["cleanup"]["stop"]["status"], "ok")
+        self.assertEqual(record["cleanup"]["remove"]["status"], "ok")
 
 
 class ContainerTests(unittest.TestCase):
+    def test_term_forwards_to_cli_then_restores_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, body in [("mkdir", ":"), ("dbus-daemon", ":"),
+                               ("chown", f"test -f '{root}/result'; echo restored > '{root}/owner'")]:
+                tool = root / name
+                tool.write_text(f"#!/bin/sh\n{body}\n")
+                tool.chmod(0o755)
+            cli = root / "cli.py"
+            cli.write_text("import signal, time\nfrom pathlib import Path\n"
+                           f"root = Path({str(root)!r})\n"
+                           "def cancel(*_):\n"
+                           "    (root / 'result').write_text('cancelled')\n"
+                           "    raise SystemExit(1)\n"
+                           "signal.signal(signal.SIGTERM, cancel)\n"
+                           "(root / 'ready').touch()\n"
+                           "time.sleep(30)\n")
+            child = subprocess.Popen(["sh", str(ROOT / "action/container.sh"), "root", "1000", "1000",
+                                      "output", "python3", str(cli)],
+                                     env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}"})
+            try:
+                deadline = time.monotonic() + 5
+                while not (root / "ready").exists():
+                    self.assertIsNone(child.poll())
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                child.send_signal(signal.SIGTERM)
+                self.assertNotEqual(child.wait(timeout=5), 0)
+                self.assertEqual((root / "result").read_text(), "cancelled")
+                self.assertEqual((root / "owner").read_text(), "restored\n")
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+
     def test_ownership_failure_fails_success_but_preserves_cli_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             bin_path = Path(directory)

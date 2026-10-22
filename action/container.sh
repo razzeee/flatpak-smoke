@@ -15,11 +15,21 @@ else
     mkdir -p "$output"
 fi
 set +e
+# Run asynchronously so the shell can forward Docker's TERM and still restore
+# ownership after the CLI's own cancellation/result cleanup finishes.
+cancel() {
+    trap '' TERM INT
+    kill -TERM "$child" 2>/dev/null || :
+    wait "$child"
+}
+trap cancel TERM INT
 if [ "$user" = nobody ]; then
-    setpriv --reuid=65534 --regid=65534 --clear-groups env HOME=/tmp USER=nobody "$@"
+    setpriv --reuid=65534 --regid=65534 --clear-groups env HOME=/tmp USER=nobody "$@" &
 else
-    "$@"
+    "$@" &
 fi
+child=$!
+wait "$child"
 status=$?
 # Host runners must be able to upload logs and remove artifacts after failures.
 if ! chown -hR "$owner_uid:$owner_gid" "$output"; then
