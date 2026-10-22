@@ -411,6 +411,15 @@ jobs:
                 --output target/compatibility/run --image-id "$1"
             ' compatibility "$image_id"
 
+      - name: Check VLC first-run focus regression
+        run: |
+          docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
+            -v "$PWD:/workspace" -w /workspace screenshot-compatibility \
+            setpriv --reuid=65534 --regid=65534 --clear-groups \
+            python3 tests/compatibility/vlc_focus.py \
+            --bundle /opt/compatibility/artifacts/org.videolan.VLC.flatpak \
+            --output target/compatibility/vlc-focus
+
       - name: Check detached-app cancellation cleanup
         run: |
           docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \

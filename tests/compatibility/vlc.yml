@@ -1,0 +1,20 @@
+version: 1
+launch:
+  args:
+    - --no-one-instance
+    # A fresh profile otherwise opens a dialog that blocks main-window focus.
+    - --no-qt-privacy-ask
+    - --no-metadata-network-access
+window:
+  title: VLC media player
+  width: 900
+  height: 600
+steps:
+  - capture:
+      name: overview
+      caption: Open media in VLC
+  - key: Ctrl+l
+  - wait_text: Playlist
+  - capture:
+      name: playlist
+      caption: Organize media in a playlist

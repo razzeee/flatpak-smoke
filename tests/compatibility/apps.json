@@ -16,6 +16,13 @@
       "captures": ["overview", "calculation"]
     },
     {
+      "name": "vlc",
+      "app_id": "org.videolan.VLC",
+      "toolkit": "Qt/Xwayland",
+      "recipe": "vlc.yml",
+      "captures": ["overview", "playlist"]
+    },
+    {
       "name": "vscodium",
       "app_id": "com.vscodium.codium",
       "toolkit": "Electron",
