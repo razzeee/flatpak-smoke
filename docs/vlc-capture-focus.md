@@ -40,7 +40,8 @@ helper RPC. Window disappearance and desktop modal checks remain failures.
 
 Focus must still equal the exact selected window. A visible application-modal
 window also blocks its transient parent; an unparented modal blocks another
-window with the same nonempty sandbox app ID. This matters for VLC: X11 can
+window with the same nonempty sandbox app ID, except its own transient
+descendants (including nested dialogs). This matters for VLC: X11 can
 temporarily grant focus to its main window even while Qt's application modal
 prevents useful input. A recipe can explicitly select the dialog itself.
 
@@ -68,8 +69,10 @@ privacy dialog. A longer delay cannot resolve that modal.
 - `node --test tests/gnome-capture.mjs` exercises the actual extension handler:
   delayed focus, mapping transition, bounded timeout, window disappearance,
   VLC's unparented modal (including focus temporarily on the main window),
-  wrong-app rejection, desktop modals, and capture stream cleanup. The three
-  new test groups fail against the original extension.
+  nested dialog targeting, wrong-app rejection, desktop modals, and capture
+  stream cleanup. The readiness/modal diagnostic regressions fail against the
+  original extension; the nested-dialog regression fails before the ancestor
+  exemption was added.
 - `tests/compatibility/vlc_focus.py` passed against real VLC: the unconfigured
   profile fails before recipe steps with modal diagnostics; the configured
   profile produces validated initial and playlist PNGs after keyboard input.

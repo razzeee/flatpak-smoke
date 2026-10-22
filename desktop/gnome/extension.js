@@ -132,11 +132,17 @@ export default class Capture extends Extension {
         if (Main.modalCount > 0)
             throw new Error('A desktop modal dialog blocks the selected window');
         const appId = window.get_sandboxed_app_id();
+        // A modal can open another dialog. Its own transient descendants are
+        // valid targets, even when the modal itself has no transient parent.
+        const ancestors = new Set([window]);
+        for (let parent = window.get_transient_for(); parent && !ancestors.has(parent);
+            parent = parent.get_transient_for())
+            ancestors.add(parent);
         const modal = this._windows().find(candidate => candidate !== window &&
             candidate.get_window_type() === Meta.WindowType.MODAL_DIALOG &&
             !candidate.is_hidden() &&
             (candidate.get_transient_for() === window ||
-                (candidate.get_transient_for() === null && appId &&
+                (candidate.get_transient_for() === null && !ancestors.has(candidate) && appId &&
                     candidate.get_sandboxed_app_id() === appId)));
         if (modal)
             throw new Error(`An application modal dialog blocks the selected window: ${JSON.stringify(this._focusState(window))}`);

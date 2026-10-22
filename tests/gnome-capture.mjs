@@ -60,6 +60,46 @@ test('VLC first-run dialog blocks main-window resize, capture and input with ide
     await assert.rejects(extension._call({action: 'key', window: 1, app_id: appId}), /desktop modal/);
 });
 
+test('an unparented modal permits its focused transient descendants but blocks unrelated windows', async () => {
+    const appId = 'org.example.App';
+    const makeWindow = (id, parent, type = 4) => ({
+        get_stable_sequence: () => id, get_title: () => `Window ${id}`,
+        get_sandboxed_app_id: () => appId, get_pid: () => 100,
+        get_transient_for: () => parent, get_window_type: () => type,
+        is_hidden: () => false, minimized: false, activate() {},
+    });
+    const preferences = makeWindow(1, null);
+    const chooser = makeWindow(2, preferences);
+    const confirmation = makeWindow(3, chooser);
+    const unrelated = makeWindow(4, null, 0);
+    const display = {focus_window: chooser};
+    const context = vm.createContext({
+        Extension: class {}, Meta: {WindowType: {MODAL_DIALOG: 4}},
+        GLib: {get_monotonic_time: () => 0,
+            timeout_add: (_priority, _ms, callback) => callback()},
+        Main: {overview: {hide() {}}, modalCount: 0},
+        global: {get_current_time: () => 0, display},
+    });
+    const extension = vm.runInContext(`${source}\nnew Capture()`, context);
+    let windows = [preferences, chooser, unrelated];
+    extension._windows = () => windows;
+    extension._info = window => ({id: window.get_stable_sequence()});
+    assert.deepEqual(await extension._call({action: 'focus', window: 2, app_id: appId}), {id: 2});
+    windows = [...windows, confirmation];
+    display.focus_window = confirmation;
+    assert.deepEqual(await extension._call({action: 'focus', window: 3, app_id: appId}), {id: 3});
+    let pressed = 0;
+    extension._key = (_key, down) => { if (down) pressed++; };
+    await extension._call({action: 'key', window: 3, app_id: appId, keys: [13]});
+    assert.equal(pressed, 1);
+    for (const id of [1, 2, 4]) {
+        display.focus_window = windows.find(window => window.get_stable_sequence() === id);
+        await assert.rejects(extension._call({action: 'key', window: id, app_id: appId, keys: [13]}),
+            /application modal/);
+    }
+    assert.equal(pressed, 1, 'blocked parents and unrelated windows must not receive input');
+});
+
 test('focus timeout and window disappearance cannot dispatch input', async () => {
     for (const disappears of [false, true]) {
         let time = 0;
@@ -93,6 +133,7 @@ test('Xwayland focus waits for mapping and delayed focus without replaying resiz
         const window = {
             get_stable_sequence: () => 2,
             get_sandboxed_app_id: () => 'org.videolan.VLC',
+            get_transient_for: () => null,
             is_hidden: () => mapsLate && time < 250_000,
             activate() {
                 activations++;
@@ -127,7 +168,7 @@ test('window capture excludes compositor cursor and closes stream on success or 
         let captured = false;
         const stream = {close() { closed = true; }};
         const window = {get_stable_sequence: () => 9, get_sandboxed_app_id: () => '',
-            is_hidden: () => false, activate() {}};
+            get_transient_for: () => null, is_hidden: () => false, activate() {}};
         const context = vm.createContext({
             Extension: class {},
             Gio: {
