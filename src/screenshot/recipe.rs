@@ -1,8 +1,8 @@
 use anyhow::{Context, bail, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, ser::SerializeMap};
 use std::{collections::HashSet, path::Path, time::Duration};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
     pub version: u32,
@@ -19,26 +19,26 @@ pub struct Recipe {
     pub steps: Vec<Step>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Setup {
     pub files: Vec<SeedFile>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SeedFile {
     pub source: std::path::PathBuf,
     pub destination: std::path::PathBuf,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Launch {
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Window {
     pub title: Option<String>,
@@ -56,14 +56,14 @@ impl Default for Window {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capture {
     pub name: String,
     pub caption: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
     pub title: String,
@@ -74,7 +74,7 @@ pub enum Action {
     Capture(Capture),
     ClickText(String),
     TypeText(String),
-    Key(Vec<u32>),
+    Key { chord: String, values: Vec<u32> },
     WaitText(String),
     SelectWindow(Selection),
 }
@@ -108,10 +108,8 @@ impl TryFrom<RawStep> for Step {
             raw.wait_text.map(Action::WaitText),
             raw.select_window.map(Action::SelectWindow),
             raw.key
-                .as_deref()
-                .map(key_values)
-                .transpose()?
-                .map(Action::Key),
+                .map(|chord| key_values(&chord).map(|values| Action::Key { chord, values }))
+                .transpose()?,
         ]
         .into_iter()
         .flatten()
@@ -146,7 +144,7 @@ impl TryFrom<RawStep> for Step {
                 "type_text must contain nonempty text without NUL"
             ),
             Action::SelectWindow(selection) => nonempty(&selection.title, "window title")?,
-            Action::Key(_) => {}
+            Action::Key { .. } => {}
         }
         let timeout = raw
             .timeout
@@ -167,6 +165,14 @@ fn english() -> String {
 
 impl Recipe {
     pub fn parse(contents: &[u8]) -> anyhow::Result<Self> {
+        Self::parse_inner(contents, false)
+    }
+
+    pub fn parse_draft(contents: &[u8]) -> anyhow::Result<Self> {
+        Self::parse_inner(contents, true)
+    }
+
+    fn parse_inner(contents: &[u8], draft: bool) -> anyhow::Result<Self> {
         let text = std::str::from_utf8(contents).context("screenshot recipe is not UTF-8")?;
         let recipe: Self = serde_yaml_ng::from_str(text).context("parsing screenshot recipe")?;
         ensure!(
@@ -202,7 +208,7 @@ impl Recipe {
             }
         }
         ensure!(
-            !names.is_empty(),
+            draft || !names.is_empty(),
             "recipe must contain at least one capture"
         );
         Ok(recipe)
@@ -235,6 +241,29 @@ impl Recipe {
             super::setup::expand(arg, Path::new("/profile"))?;
         }
         Ok(())
+    }
+}
+
+impl Serialize for Step {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        match &self.action {
+            Action::Capture(value) => map.serialize_entry("capture", value)?,
+            Action::ClickText(value) => map.serialize_entry("click_text", value)?,
+            Action::TypeText(value) => map.serialize_entry("type_text", value)?,
+            Action::Key { chord, .. } => map.serialize_entry("key", chord)?,
+            Action::WaitText(value) => map.serialize_entry("wait_text", value)?,
+            Action::SelectWindow(value) => map.serialize_entry("select_window", value)?,
+        }
+        if let Some(timeout) = self.timeout {
+            let value = if timeout.subsec_nanos() == 0 {
+                format!("{}s", timeout.as_secs())
+            } else {
+                format!("{}ms", timeout.as_millis())
+            };
+            map.serialize_entry("timeout", &value)?;
+        }
+        map.end()
     }
 }
 

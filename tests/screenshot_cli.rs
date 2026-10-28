@@ -2,6 +2,52 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
+fn author_accepts_empty_drafts_and_resets_validation_only_with_force() {
+    let temp = tempfile::tempdir().unwrap();
+    let recipe = temp.path().join("draft.yml");
+    let bundle = temp.path().join("fixture.flatpak");
+    let output = temp.path().join("author");
+    let original = "version: 1\nsteps: []\n";
+    std::fs::write(&recipe, original).unwrap();
+    std::fs::write(&bundle, "dependency check precedes installation").unwrap();
+    std::fs::create_dir(&output).unwrap();
+    let marker = output.join("author.json");
+    std::fs::write(&marker, r#"{"status":"validated"}"#).unwrap();
+
+    for force in [false, true] {
+        let mut command = Command::cargo_bin("flatpak-smoke").unwrap();
+        command
+            .env("PATH", temp.path())
+            .arg("author-bundle")
+            .arg(&bundle)
+            .arg("--recipe")
+            .arg(&recipe)
+            .arg("--output")
+            .arg(&output);
+        if force {
+            command.arg("--force");
+        }
+        command
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(if force {
+                "missing screenshot tools"
+            } else {
+                "authoring output already used"
+            }));
+        let status: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(status["status"], if force { "draft" } else { "validated" });
+        assert_eq!(std::fs::read_to_string(&recipe).unwrap(), original);
+    }
+    let result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(output.join("session-001/result.json")).unwrap())
+            .unwrap();
+    assert_eq!(result["failure"]["reason"], "dependency_failed");
+    assert!(!output.join("validation").exists());
+}
+
+#[test]
 fn invalid_recipe_is_rejected_before_artifact_installation() {
     let temp = tempfile::tempdir().unwrap();
     let recipe = temp.path().join("recipe.yml");

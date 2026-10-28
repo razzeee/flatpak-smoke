@@ -35,6 +35,7 @@ pub fn run() -> anyhow::Result<()> {
         Commands::VerifyRepo(args) => verify::verify_repo(args),
         Commands::ScreenshotBundle(args) => screenshot::bundle(args),
         Commands::ScreenshotRepo(args) => screenshot::repo(args),
+        Commands::AuthorBundle(args) => screenshot::author_bundle(args),
     }
 }
 

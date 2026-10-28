@@ -23,6 +23,8 @@ pub enum Commands {
     ScreenshotBundle(ScreenshotBundleArgs),
     /// Capture native application windows from a local repository using a recipe.
     ScreenshotRepo(ScreenshotRepoArgs),
+    /// Author a recipe interactively, then validate it in a fresh session.
+    AuthorBundle(ScreenshotBundleArgs),
     /// Check required host/container tooling.
     Doctor(DoctorArgs),
 }
@@ -49,7 +51,7 @@ pub struct ScreenshotRepoArgs {
     pub common: ScreenshotArgs,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct ScreenshotArgs {
     /// Frozen local Flatpak repository supplying runtimes and extensions.
     #[arg(long)]

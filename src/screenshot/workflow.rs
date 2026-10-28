@@ -101,22 +101,9 @@ impl Workflow<'_> {
         mut selected: u64,
         default_timeout: Duration,
         manifest: &mut Manifest,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         for (index, step) in recipe.steps.iter().enumerate() {
-            manifest.failed_step_index = Some(index);
-            self.layout
-                .append_runner_log(format!("recipe step {index}"))?;
-            let deadline = bounded(self.overall, step.timeout.unwrap_or(default_timeout));
-            let result = self
-                .step(step, &mut selected, deadline, manifest)
-                .with_context(|| format!("recipe step {index}"));
-            finish_check(result, self.desktop.check(deadline)).map_err(|error| {
-                if error.downcast_ref::<super::CaptureFailure>().is_some() {
-                    error
-                } else {
-                    failure(FailureReason::ScreenshotFailed, format!("{error:#}"))
-                }
-            })?;
+            self.execute_step(step, index, &mut selected, default_timeout, manifest)?;
         }
         manifest.failed_step_index = None;
         remaining(self.overall)?;
@@ -124,7 +111,73 @@ impl Workflow<'_> {
             .windows(bounded(self.overall, Duration::from_secs(1)))
             .context("final helper check")
             .map_err(infrastructure)?;
-        self.desktop.check(self.overall)
+        self.desktop.check(self.overall)?;
+        Ok(selected)
+    }
+
+    pub fn execute_step(
+        &self,
+        step: &Step,
+        index: usize,
+        selected: &mut u64,
+        default_timeout: Duration,
+        manifest: &mut Manifest,
+    ) -> anyhow::Result<()> {
+        manifest.failed_step_index = Some(index);
+        self.layout
+            .append_runner_log(format!("recipe step {index}"))?;
+        let deadline = bounded(self.overall, step.timeout.unwrap_or(default_timeout));
+        let result = self
+            .step(step, selected, deadline, manifest)
+            .with_context(|| format!("recipe step {index}"));
+        finish_check(result, self.desktop.check(deadline)).map_err(|error| {
+            if error.downcast_ref::<super::CaptureFailure>().is_some() {
+                error
+            } else {
+                failure(FailureReason::ScreenshotFailed, format!("{error:#}"))
+            }
+        })?;
+        manifest.failed_step_index = None;
+        Ok(())
+    }
+
+    /// Authoring observations use the same native capture and OCR as replay.
+    pub fn inspect(&self, selected: u64, deadline: Instant) -> anyhow::Result<()> {
+        for window in self.desktop.windows(deadline)? {
+            println!(
+                "Window {}: {:?}{}",
+                window.id,
+                window.title,
+                if window.id == selected {
+                    " (selected)"
+                } else {
+                    ""
+                }
+            );
+        }
+        let snapshot = self.snapshot(selected, deadline)?;
+        self.with_snapshot(snapshot, |snapshot| {
+            let path = self.layout.logs_dir.join("observation.png");
+            fs::copy(snapshot.path(), &path)?;
+            println!("Image: {}", path.display());
+            for (index, tsv) in self
+                .images
+                .ocr(snapshot.path(), deadline)?
+                .iter()
+                .enumerate()
+            {
+                let words: Vec<_> = tsv
+                    .lines()
+                    .filter_map(|line| {
+                        let fields: Vec<_> = line.splitn(12, '\t').collect();
+                        (fields.len() == 12 && fields[0] == "5" && !fields[11].trim().is_empty())
+                            .then(|| fields[11])
+                    })
+                    .collect();
+                println!("OCR pass {}: {:?}", index + 1, words.join(" "));
+            }
+            Ok(())
+        })
     }
 
     fn step(
@@ -198,8 +251,9 @@ impl Workflow<'_> {
             Action::TypeText(text) => {
                 self.desktop.input(*selected, Input::Text(text), deadline)?;
             }
-            Action::Key(keys) => {
-                self.desktop.input(*selected, Input::Key(keys), deadline)?;
+            Action::Key { values, .. } => {
+                self.desktop
+                    .input(*selected, Input::Key(values), deadline)?;
             }
             Action::WaitText(label) => loop {
                 let snapshot = self.snapshot(*selected, deadline)?;

@@ -1,4 +1,5 @@
 mod app_ref;
+mod author;
 mod desktop;
 mod gnome;
 mod images;
@@ -92,10 +93,26 @@ pub fn repo(args: ScreenshotRepoArgs) -> anyhow::Result<()> {
     )
 }
 
+pub fn author_bundle(args: ScreenshotBundleArgs) -> anyhow::Result<()> {
+    author::bundle(args)
+}
+
 fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
+    run_session(&common, &source, None)
+}
+
+fn run_session(
+    common: &ScreenshotArgs,
+    source: &Source,
+    mut author: Option<&mut author::Session>,
+) -> anyhow::Result<()> {
     let recipe_contents = std::fs::read(&common.recipe).context("reading screenshot recipe")?;
-    let recipe = recipe::Recipe::parse(&recipe_contents)?;
-    let (path, artifact) = match &source {
+    let mut recipe = if author.is_some() {
+        recipe::Recipe::parse_draft(&recipe_contents)?
+    } else {
+        recipe::Recipe::parse(&recipe_contents)?
+    };
+    let (path, artifact) = match source {
         Source::Bundle(path) => (path, Artifact::bundle(path)),
         Source::Repo(path, _) => (path, Artifact::repo(path)),
     };
@@ -105,6 +122,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
     let deadline = started
         .checked_add(common.overall_timeout)
         .context("overall timeout is too large")?;
+    let deadline = author.as_ref().map_or(deadline, |session| session.deadline);
     let layout = OutputLayout::prepare(&common.output, common.force)?;
     let mut manifest = manifest::Manifest::new();
     let mut timings = Timings::default();
@@ -147,7 +165,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
             installer
                 .add_flathub_if_allowed(common.allow_network_remotes)
                 .map_err(|error| failure(FailureReason::DependencyFailed, error.to_string()))?;
-            match &source {
+            match source {
                 Source::Bundle(_) => {
                     installer
                         .install_bundle(&absolute_path)
@@ -241,29 +259,56 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
             let selected =
                 workflow.initialize(&recipe, workflow::bounded(deadline, common.window_timeout))?;
             timings.launch_to_window = Some(launch_started.elapsed().as_millis());
-            workflow.execute(&recipe, selected, common.screenshot_timeout, &mut manifest)
+            let selected =
+                workflow.execute(&recipe, selected, common.screenshot_timeout, &mut manifest)?;
+            if let Some(author) = author.as_mut() {
+                author
+                    .interact(
+                        &workflow,
+                        &mut recipe,
+                        &recipe_contents,
+                        selected,
+                        common,
+                        &mut manifest,
+                    )
+                    .map_err(|error| {
+                        if error.downcast_ref::<CaptureFailure>().is_some() {
+                            error
+                        } else {
+                            failure(FailureReason::ScreenshotFailed, format!("{error:#}"))
+                        }
+                    })?;
+            }
+            Ok(())
         })();
         // Preserve the workflow's classified failure, especially cancellation.
         // Only a successful workflow needs a final liveness check.
         result.and_then(|()| desktop.check(deadline))
     })();
     timings.total = started.elapsed().as_millis();
+    // Report failed actions even when the user chooses to restart.
+    // Only a fresh replay can validate the completed recipe.
+    let reported_error = outcome.as_ref().err().or_else(|| {
+        author
+            .as_ref()
+            .and_then(|session| session.failed_action.as_ref())
+    });
     let mut screenshots: Vec<_> = manifest
         .captures
         .iter()
         .map(|capture| capture.path.clone())
         .collect();
-    if outcome.is_err() && layout.logs_dir.join("last-candidate.png").is_file() {
+    if reported_error.is_some() && layout.logs_dir.join("last-candidate.png").is_file() {
         screenshots.push("logs/last-candidate.png".into());
     }
-    let mut result = match &outcome {
-        Ok(()) => RunResult::passed(
+    let mut result = match reported_error {
+        None => RunResult::passed(
             manifest.app_ref.clone().unwrap_or_default(),
             artifact,
             timings,
             screenshots,
         ),
-        Err(error) => RunResult::failed(
+        Some(error) => RunResult::failed(
             manifest.app_ref.clone(),
             artifact,
             timings,
@@ -276,7 +321,7 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
         ),
     };
     result.phase_metadata = phase_metadata;
-    if let (Some(failure), Err(error)) = (&mut result.failure, &outcome) {
+    if let (Some(failure), Some(error)) = (&mut result.failure, reported_error) {
         failure.category = error
             .downcast_ref::<CaptureFailure>()
             .and_then(|error| error.category);
