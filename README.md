@@ -79,6 +79,9 @@ Choose a size your app supports and describe the content in the caption. Recipes
 can also click buttons, enter text, wait for content, and select another window.
 See the [recipe actions](docs/reference.md#writing-a-recipe).
 
+Source builds include [interactive recipe authoring](docs/recipe-authoring.md).
+Run one step at a time, save the YAML, and check it in a fresh session.
+
 ### 2. Add sample content if your app needs it
 
 Check in a small example document or project and, optionally, app settings:

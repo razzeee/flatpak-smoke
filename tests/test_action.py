@@ -186,6 +186,55 @@ class ActionTests(unittest.TestCase):
             record = json.loads((self.workspace / "artifacts/flatpak-smoke.execution.json").read_text())
             self.assertEqual(record["status"], status)
 
+    def test_cleanup_waits_for_removal_already_in_progress(self):
+        action = runpy.run_path(str(ROOT / "action/run.py"))
+        conflict = "Error response from daemon: removal of container fixture is already in progress"
+        with mock.patch("subprocess.run", side_effect=[
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 1, "", conflict),
+            subprocess.CompletedProcess([], 1, "", "Error response from daemon: No such container: fixture"),
+        ]) as run, mock.patch("time.sleep"):
+            result = action["cleanup"]("fixture", 30, True)
+        self.assertEqual(result["stop"]["status"], "ok")
+        self.assertEqual(result["remove"]["status"], "absent")
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_args_list[2].args[0], ["docker", "rm", "-f", "fixture"])
+
+    def test_cleanup_removal_retries_share_the_stop_deadline(self):
+        action = runpy.run_path(str(ROOT / "action/run.py"))
+        now = 0.0
+
+        def run(command, **kwargs):
+            nonlocal now
+            if command[1] == "stop":
+                self.assertLessEqual(kwargs["timeout"], .5)
+                now += .4
+                return subprocess.CompletedProcess(command, 0, "", "")
+            self.assertGreater(kwargs["timeout"], 0)
+            self.assertLessEqual(kwargs["timeout"], 1 - now)
+            self.assertLessEqual(kwargs["timeout"], .6)
+            return subprocess.CompletedProcess(command, 1, "",
+                "Error response from daemon: removal of container fixture is already in progress")
+
+        def sleep(seconds):
+            nonlocal now
+            now += seconds
+
+        with mock.patch("time.monotonic", side_effect=lambda: now), \
+                mock.patch("time.sleep", side_effect=sleep), \
+                mock.patch("subprocess.run", side_effect=run):
+            result = action["cleanup"]("fixture", 1, True)
+        self.assertEqual(result["remove"]["status"], "timeout")
+        self.assertEqual(now, 1)
+
+    def test_cleanup_does_not_retry_other_removal_errors(self):
+        action = runpy.run_path(str(ROOT / "action/run.py"))
+        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess(
+                [], 1, "", "Cannot connect to the Docker daemon")) as run:
+            result = action["cleanup"]("fixture", 30, False)
+        self.assertEqual(result["remove"]["status"], "failed")
+        self.assertEqual(run.call_count, 1)
+
     def test_execution_deadline_terminates_real_docker_client_process(self):
         started = time.monotonic()
         with mock.patch.dict(os.environ, {"DOCKER_SLEEP": "30"}):

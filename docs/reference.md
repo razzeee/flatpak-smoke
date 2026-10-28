@@ -647,6 +647,9 @@ flatpak-smoke doctor --desktop gnome
 
 ### Writing a recipe
 
+Source builds include `author-bundle`. See [interactive recipe authoring](recipe-authoring.md)
+to write a recipe one step at a time and check it in a fresh session.
+
 ```yaml
 version: 1
 desktop: gnome

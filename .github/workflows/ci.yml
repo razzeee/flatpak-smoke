@@ -302,6 +302,11 @@ jobs:
           docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
             -v "$PWD:/workspace" -w /workspace screenshot-tests python3 tests/screenshot_setup.py
 
+      - name: Author recipes and validate fresh replays
+        run: |
+          docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
+            -v "$PWD:/workspace" -w /workspace screenshot-tests python3 tests/screenshot_author.py
+
       - name: Prepare frozen screenshot runtime inputs
         run: |
           python3 action/prepare-dependencies.py --installation "$HOME/.local/share/flatpak" \
@@ -360,6 +365,7 @@ jobs:
             target/screenshot-workflow-*/**
             target/screenshot-failures/**
             target/screenshot-setup-*/**
+            target/screenshot-author/**
             target/screenshot-action-*/**
             target/xwayland-capture/**
 

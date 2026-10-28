@@ -115,13 +115,26 @@ def cleanup(name, budget, interrupted):
         commands.append(("stop", ["docker", "stop", "--time", str(max(1, budget // 2 - 1)), name], budget / 2))
     commands.append(("remove", ["docker", "rm", "-f", name], budget))
     for stage, command, limit in commands:
+        stage_deadline = min(deadline, time.monotonic() + limit)
         try:
-            result = subprocess.run(command, capture_output=True, text=True, check=False,
-                                    start_new_session=True,
-                                    timeout=max(.001, min(limit, deadline - time.monotonic())))
-            absent = "No such container" in result.stderr
-            results[stage] = {"status": "absent" if absent else "ok" if result.returncode == 0 else "failed",
-                              "exit_code": result.returncode, "stderr": result.stderr[-4096:]}
+            while True:
+                remaining = stage_deadline - time.monotonic()
+                if remaining <= 0:
+                    results[stage] = {"status": "timeout"}
+                    break
+                result = subprocess.run(command, capture_output=True, text=True, check=False,
+                                        start_new_session=True, timeout=remaining)
+                # docker run --rm may still be removing the stopped container.
+                # Retry until removal succeeds or Docker confirms it is absent.
+                if (stage == "remove" and result.returncode != 0
+                        and "removal of container" in result.stderr
+                        and "is already in progress" in result.stderr):
+                    time.sleep(max(0, min(.1, stage_deadline - time.monotonic())))
+                    continue
+                absent = "No such container" in result.stderr
+                results[stage] = {"status": "absent" if absent else "ok" if result.returncode == 0 else "failed",
+                                  "exit_code": result.returncode, "stderr": result.stderr[-4096:]}
+                break
         except subprocess.TimeoutExpired:
             results[stage] = {"status": "timeout"}
         except OSError as error:
