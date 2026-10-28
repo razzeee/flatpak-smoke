@@ -108,10 +108,16 @@ def main():
         if workspace.exists():
             # Capture evidence before the surrounding container is removed.
             # Bound the listing in case a whole installation remains behind.
-            listing = subprocess.run(
-                ["find", str(workspace), "-maxdepth", "4", "-ls"],
-                capture_output=True, text=True, timeout=10, check=False,
-            )
+            try:
+                listing = subprocess.run(
+                    ["find", str(workspace), "-maxdepth", "4", "-ls"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError) as error:
+                raise AssertionError(
+                    f"private workspace leaked: {workspace}\n"
+                    f"could not list remaining files: {error}"
+                ) from error
             raise AssertionError(
                 f"private workspace leaked: {workspace}\n"
                 f"{listing.stdout[:16384]}\n{listing.stderr[:4096]}"
