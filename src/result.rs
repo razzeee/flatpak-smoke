@@ -12,6 +12,16 @@ pub struct RunResult {
     pub timings_ms: Timings,
     pub screenshots: Vec<String>,
     pub failure: Option<Failure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateMetadata>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateMetadata {
+    pub from: Option<Artifact>,
+    pub before: PhaseMetadata,
+    pub after: PhaseMetadata,
+    pub failed_phase: Option<String>,
 }
 
 impl RunResult {
@@ -30,6 +40,7 @@ impl RunResult {
             timings_ms,
             screenshots,
             failure: None,
+            update: None,
         }
     }
 
@@ -54,6 +65,7 @@ impl RunResult {
                 category: None,
                 message: message.into(),
             }),
+            update: None,
         }
     }
 
@@ -151,6 +163,7 @@ pub enum FailureReason {
     LaunchFailed,
     WindowTimeout,
     EarlyExit,
+    ShutdownFailed,
     ScreenshotFailed,
     AppErrorWindow,
     InternalError,

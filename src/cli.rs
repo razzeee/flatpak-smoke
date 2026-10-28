@@ -19,6 +19,8 @@ pub enum Commands {
     VerifyBundle(VerifyBundleArgs),
     /// Verify an app ref from a local Flatpak OSTree repository.
     VerifyRepo(VerifyRepoArgs),
+    /// Verify a forward bundle update using data created by the old version.
+    VerifyUpdateBundle(UpdateBundleArgs),
     /// Capture native application windows from a bundle using a recipe.
     ScreenshotBundle(ScreenshotBundleArgs),
     /// Capture native application windows from a local repository using a recipe.
@@ -39,6 +41,33 @@ pub struct ScreenshotBundleArgs {
     pub bundle: PathBuf,
     #[command(flatten)]
     pub common: ScreenshotArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateBundleArgs {
+    pub bundle: PathBuf,
+    #[arg(long)]
+    pub from: PathBuf,
+    #[arg(long)]
+    pub prepare_recipe: PathBuf,
+    #[arg(long)]
+    pub verify_recipe: PathBuf,
+    #[arg(long)]
+    pub dependency_repo: Option<PathBuf>,
+    #[arg(long)]
+    pub output: PathBuf,
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long)]
+    pub allow_network_remotes: bool,
+    #[arg(long, value_parser = parse_duration, default_value = "10m")]
+    pub overall_timeout: Duration,
+    #[arg(long, value_parser = parse_duration, default_value = "30s")]
+    pub display_timeout: Duration,
+    #[arg(long, value_parser = parse_duration, default_value = "30s")]
+    pub window_timeout: Duration,
+    #[arg(long, value_parser = parse_duration, default_value = "10s")]
+    pub screenshot_timeout: Duration,
 }
 
 #[derive(Debug, Args)]

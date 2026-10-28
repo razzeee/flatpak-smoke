@@ -184,3 +184,4 @@ for apps that require another user.
 - [CLI reference](docs/reference.md): local OSTree repos, timeouts, results, host
   installation, and troubleshooting.
 - [Tested app compatibility](docs/screenshot-compatibility.md).
+- [Verify forward updates with existing app data](docs/update-verification.md).

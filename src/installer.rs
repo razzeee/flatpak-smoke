@@ -127,6 +127,103 @@ impl<'a> ArtifactInstaller<'a> {
         }
     }
 
+    /// Import into a disposable repository to inspect the exact bundle before deployment.
+    pub fn inspect_bundle(&self, bundle: &Path, repo: &Path) -> anyhow::Result<InstalledRef> {
+        let output = self.runner.run(
+            "ostree",
+            [
+                OsString::from("init"),
+                "--repo".into(),
+                repo.into(),
+                "--mode=archive-z2".into(),
+            ],
+            self.deadline,
+        )?;
+        anyhow::ensure!(
+            output.status.success(),
+            "initializing bundle inspection repository: {}",
+            output.stderr.trim()
+        );
+        let output = self.runner.run(
+            "flatpak",
+            [
+                OsString::from("build-import-bundle"),
+                repo.into(),
+                bundle.into(),
+            ],
+            self.deadline,
+        )?;
+        anyhow::ensure!(
+            output.status.success(),
+            "importing bundle: {}",
+            output.stderr.trim()
+        );
+        let output = self.runner.run(
+            "ostree",
+            [OsString::from("refs"), "--repo".into(), repo.into()],
+            self.deadline,
+        )?;
+        anyhow::ensure!(
+            output.status.success(),
+            "reading bundle ref: {}",
+            output.stderr.trim()
+        );
+        let rows: Vec<_> = output
+            .stdout
+            .lines()
+            .filter(|line| line.starts_with("app/"))
+            .collect();
+        anyhow::ensure!(
+            rows.len() == 1,
+            "bundle must contain exactly one application"
+        );
+        let reference = rows[0].trim().to_owned();
+        let output = self.runner.run(
+            "ostree",
+            [
+                OsString::from("rev-parse"),
+                "--repo".into(),
+                repo.into(),
+                reference.clone().into(),
+            ],
+            self.deadline,
+        )?;
+        let commit = output.stdout.trim();
+        anyhow::ensure!(
+            output.status.success()
+                && commit.len() == 64
+                && commit.bytes().all(|c| c.is_ascii_hexdigit()),
+            "invalid bundle commit metadata"
+        );
+        Ok(InstalledRef {
+            reference,
+            commit: Some(commit.into()),
+        })
+    }
+
+    pub fn update_bundle(&self, bundle: &Path) -> Result<(), InstallError> {
+        let output = self
+            .runner
+            .run(
+                "flatpak",
+                [
+                    OsString::from("install"),
+                    "--user".into(),
+                    "--noninteractive".into(),
+                    "--or-update".into(),
+                    "--bundle".into(),
+                    bundle.into(),
+                ],
+                self.deadline,
+            )
+            .map_err(|error| InstallError::new(FailureReason::InstallFailed, error.to_string()))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(classify_install_error(output.stderr))
+        }
+    }
+
     pub fn list_installed_app_refs(&self) -> anyhow::Result<Vec<String>> {
         let output = self.runner.run(
             "flatpak",

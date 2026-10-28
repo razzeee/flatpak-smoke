@@ -6,6 +6,7 @@ mod manifest;
 mod recipe;
 mod setup;
 mod snapshot;
+pub(crate) mod update;
 mod workflow;
 mod workspace;
 
@@ -95,6 +96,10 @@ pub fn repo(args: ScreenshotRepoArgs) -> anyhow::Result<()> {
 fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
     let recipe_contents = std::fs::read(&common.recipe).context("reading screenshot recipe")?;
     let recipe = recipe::Recipe::parse(&recipe_contents)?;
+    anyhow::ensure!(
+        recipe.quit.is_none(),
+        "quit is only supported by verify-update-bundle"
+    );
     let (path, artifact) = match &source {
         Source::Bundle(path) => (path, Artifact::bundle(path)),
         Source::Repo(path, _) => (path, Artifact::repo(path)),
@@ -241,7 +246,9 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
             let selected =
                 workflow.initialize(&recipe, workflow::bounded(deadline, common.window_timeout))?;
             timings.launch_to_window = Some(launch_started.elapsed().as_millis());
-            workflow.execute(&recipe, selected, common.screenshot_timeout, &mut manifest)
+            workflow
+                .execute(&recipe, selected, common.screenshot_timeout, &mut manifest)
+                .map(|_| ())
         })();
         // Preserve the workflow's classified failure, especially cancellation.
         // Only a successful workflow needs a final liveness check.

@@ -59,6 +59,7 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends flatpak ostree
           cargo test --lib local_dependencies_are_reusable_and_private -- --ignored
+          cargo test --lib bundle_update_preserves_profile_and_deploys_exact_commit -- --ignored
 
       - name: Check compatibility report validation
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/compatibility -p test_matrix.py
@@ -319,6 +320,16 @@ jobs:
           image: screenshot-production
           dependency-repo: target/dependencies
 
+      - name: Verify forward updates preserve existing user data
+        run: |
+          # The fixture uses Cairo; avoid unrelated GL-driver setup failures.
+          python3 action/prepare-dependencies.py --installation "$HOME/.local/share/flatpak" \
+            --output target/update-dependencies \
+            --ref runtime/org.gnome.Platform/x86_64/49
+          docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri --tmpfs /tmp:rw,size=4g \
+            -v "$PWD:/workspace" -w /workspace screenshot-production \
+            python3 tests/update_workflow.py --dependency-repo /workspace/target/update-dependencies
+
       - name: Capture seeded repository through the action as non-root
         uses: ./
         with:
@@ -362,6 +373,7 @@ jobs:
             target/screenshot-setup-*/**
             target/screenshot-action-*/**
             target/xwayland-capture/**
+            target/update-workflow/**
 
   publish:
     name: Publish ${{ matrix.image }}

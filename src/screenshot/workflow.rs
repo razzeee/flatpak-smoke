@@ -101,7 +101,7 @@ impl Workflow<'_> {
         mut selected: u64,
         default_timeout: Duration,
         manifest: &mut Manifest,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         for (index, step) in recipe.steps.iter().enumerate() {
             manifest.failed_step_index = Some(index);
             self.layout
@@ -109,7 +109,12 @@ impl Workflow<'_> {
             let deadline = bounded(self.overall, step.timeout.unwrap_or(default_timeout));
             let result = self
                 .step(step, &mut selected, deadline, manifest)
-                .with_context(|| format!("recipe step {index}"));
+                .with_context(|| match &step.action {
+                    Action::WaitText(label) => {
+                        format!("recipe step {index}: waiting for text '{label}'")
+                    }
+                    _ => format!("recipe step {index}"),
+                });
             finish_check(result, self.desktop.check(deadline)).map_err(|error| {
                 if error.downcast_ref::<super::CaptureFailure>().is_some() {
                     error
@@ -124,7 +129,8 @@ impl Workflow<'_> {
             .windows(bounded(self.overall, Duration::from_secs(1)))
             .context("final helper check")
             .map_err(infrastructure)?;
-        self.desktop.check(self.overall)
+        self.desktop.check(self.overall)?;
+        Ok(selected)
     }
 
     fn step(

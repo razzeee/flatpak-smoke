@@ -16,7 +16,26 @@ pub struct Recipe {
     pub setup: Setup,
     #[serde(default)]
     pub launch: Launch,
+    #[serde(default)]
+    pub quit: Option<Quit>,
     pub steps: Vec<Step>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Quit {
+    pub key: String,
+    pub timeout: String,
+}
+
+impl Quit {
+    pub fn keys(&self) -> anyhow::Result<Vec<u32>> {
+        key_values(&self.key)
+    }
+
+    pub fn duration(&self) -> anyhow::Result<Duration> {
+        crate::cli::parse_duration(&self.timeout).map_err(anyhow::Error::msg)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -192,6 +211,10 @@ impl Recipe {
             nonempty(title, "window title")?;
         }
         let mut names = HashSet::new();
+        if let Some(quit) = &recipe.quit {
+            quit.keys()?;
+            quit.duration()?;
+        }
         for step in &recipe.steps {
             if let Action::Capture(capture) = &step.action {
                 ensure!(

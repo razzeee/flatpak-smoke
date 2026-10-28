@@ -125,6 +125,13 @@ impl Gnome {
             .output_before_checked(deadline, &HealthCheck::default())?;
         ensure!(output.status.success(), "enabling session accessibility");
         let bus_path = workspace.home.join("session-bus");
+        for path in [&bus_path, &workspace.home.join("helper-ready")] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         let shell_args = match backend {
             AppBackend::Wayland => {
                 "printf %s \"$DBUS_SESSION_BUS_ADDRESS\" > \"$1\"; exec gnome-shell --headless --wayland --virtual-monitor=1280x900 --no-x11"
@@ -216,6 +223,17 @@ impl Gnome {
         layout: &OutputLayout,
         deadline: Instant,
     ) -> anyhow::Result<()> {
+        self.launch_profile(app_ref, args, layout, deadline, false)
+    }
+
+    pub fn launch_profile(
+        &mut self,
+        app_ref: &AppRef,
+        args: &[String],
+        layout: &OutputLayout,
+        deadline: Instant,
+        private_filesystem: bool,
+    ) -> anyhow::Result<()> {
         self.app_id = app_ref.id().to_string();
         let password = self.workspace.home.join("keyring-password");
         fs::write(&password, b"flatpak-smoke-capture")?;
@@ -267,9 +285,15 @@ impl Gnome {
             // A sandbox --env=DISPLAY override alone cannot provide that socket.
             connection.apply(&mut command);
         }
-        let app = command
+        command
             .env("DBUS_SESSION_BUS_ADDRESS", &self.bus)
-            .args(["run", "--user"])
+            .args(["run", "--user"]);
+        if private_filesystem {
+            // Clear manifest and override filesystem grants, including explicit
+            // absolute paths. Flatpak still supplies this workspace's app data.
+            command.arg("--nofilesystem=host:reset");
+        }
+        let app = command
             .arg(format!("--arch={}", app_ref.arch()))
             .arg(format!("--branch={}", app_ref.branch()))
             .args(display_args)
@@ -287,6 +311,48 @@ impl Gnome {
         layout.append_runner_log(format!("app launcher pid: {}", app.id()))?;
         self.app = Some(Rc::new(RefCell::new(app)));
         Ok(())
+    }
+
+    /// An intentional exit is only accepted here, never by normal recipe health checks.
+    pub fn quit(&mut self, window: u64, keys: &[u32], deadline: Instant) -> anyhow::Result<()> {
+        self.check(deadline)?;
+        // Keep ownership for Drop cleanup, but exclude the expected app exit
+        // from helper transport checks while delivering the quit shortcut.
+        let app = self.app.take().context("no app to quit")?;
+        let result = (|| {
+            self.input(window, Input::Key(keys), deadline)?;
+            loop {
+                self.check(deadline)?;
+                let status = app.borrow_mut().try_wait()?;
+                if let Some(status) = status {
+                    ensure!(
+                        status.success(),
+                        "app failed during graceful quit: {status}"
+                    );
+                }
+                let instances = self
+                    .workspace
+                    .command("flatpak")
+                    .args(["ps", "--columns=application"])
+                    .output_before_checked(deadline, &self.health())?;
+                ensure!(
+                    instances.status.success(),
+                    "checking instances during graceful quit: {}",
+                    String::from_utf8_lossy(&instances.stderr)
+                );
+                let running = String::from_utf8_lossy(&instances.stdout)
+                    .lines()
+                    .any(|id| id.trim() == self.app_id);
+                if status.is_some() && !running {
+                    return Ok(());
+                }
+                sleep_before_checked(Duration::from_millis(100), deadline, &self.health())
+                    .context("app did not quit before the shutdown deadline")?;
+            }
+        })();
+        // Even on failure, Drop retains responsibility for detached instances.
+        self.app = Some(app);
+        result
     }
 
     fn call(&self, request: Value, deadline: Instant) -> anyhow::Result<Value> {

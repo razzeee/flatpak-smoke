@@ -33,6 +33,84 @@ fn checked(args: &[&str]) {
     );
 }
 
+#[test]
+#[ignore = "requires flatpak"]
+fn bundle_update_preserves_profile_and_deploys_exact_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let build = root.join("build");
+    let repo = root.join("repo");
+    fs::create_dir_all(build.join("usr")).unwrap();
+    fs::create_dir_all(build.join("files")).unwrap();
+    fs::create_dir_all(build.join("export")).unwrap();
+    fs::write(
+        build.join("metadata"),
+        "[Runtime]\nname=org.example.Platform\n",
+    )
+    .unwrap();
+    checked(&[
+        "flatpak",
+        "build-export",
+        "--runtime",
+        "--arch=x86_64",
+        repo.to_str().unwrap(),
+        build.to_str().unwrap(),
+        "stable",
+    ]);
+    fs::write(build.join("metadata"), "[Application]\nname=org.example.Update\nruntime=org.example.Platform/x86_64/stable\nsdk=org.example.Platform/x86_64/stable\ncommand=test\n").unwrap();
+    for version in ["old", "new"] {
+        fs::write(build.join("files/payload"), version).unwrap();
+        checked(&[
+            "flatpak",
+            "build-export",
+            "--arch=x86_64",
+            repo.to_str().unwrap(),
+            build.to_str().unwrap(),
+            "stable",
+        ]);
+        checked(&[
+            "flatpak",
+            "build-bundle",
+            repo.to_str().unwrap(),
+            root.join(format!("{version}.flatpak")).to_str().unwrap(),
+            "org.example.Update",
+            "stable",
+        ]);
+    }
+    let home = root.join("home");
+    let runner = CommandRunner::new(root.join("log"))
+        .with_clean_env()
+        .with_env("PATH", std::env::var_os("PATH").unwrap())
+        .with_env("HOME", &home)
+        .with_env("XDG_DATA_HOME", home.join("data"))
+        .with_env("XDG_CONFIG_HOME", home.join("config"))
+        .with_env("XDG_CACHE_HOME", home.join("cache"))
+        .with_env("FLATPAK_SYSTEM_DIR", home.join("system"))
+        .with_env("FLATPAK_CONFIG_DIR", home.join("flatpak-config"));
+    let installer = ArtifactInstaller::new(&runner, Instant::now() + Duration::from_secs(60));
+    let old = installer
+        .inspect_bundle(&root.join("old.flatpak"), &root.join("inspect-old"))
+        .unwrap();
+    let new = installer
+        .inspect_bundle(&root.join("new.flatpak"), &root.join("inspect-new"))
+        .unwrap();
+    assert_eq!(old.reference, new.reference);
+    assert_ne!(old.commit, new.commit);
+    installer.add_dependency_repo(Some(&repo)).unwrap();
+    installer.install_bundle(&root.join("old.flatpak")).unwrap();
+    assert_eq!(installer.phase_refs(&old.reference).0, old);
+    let profile = home.join(".var/app/org.example.Update/data");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(profile.join("document"), "saved by old app").unwrap();
+    installer.update_bundle(&root.join("new.flatpak")).unwrap();
+    assert_eq!(installer.phase_refs(&new.reference).0, new);
+    assert_eq!(
+        fs::read_to_string(profile.join("document")).unwrap(),
+        "saved by old app"
+    );
+    assert_eq!(installer.list_installed_app_refs().unwrap().len(), 1);
+}
+
 // Exercises the portal's second `flatpak run`, which does not pass --user.
 // Run with a published runtime repo containing a runtime with flatpak-spawn.
 #[test]

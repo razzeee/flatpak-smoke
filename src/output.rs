@@ -26,6 +26,7 @@ impl OutputLayout {
                 root.join("screenshots.json"),
                 root.join("screenshots"),
                 root.join("logs"),
+                root.join("phases"),
             ];
             let existing: Vec<_> = protected.iter().filter(|path| path.exists()).collect();
             if !existing.is_empty() && !force {
@@ -40,6 +41,7 @@ impl OutputLayout {
                 remove_if_exists(&root.join("screenshots.json"))?;
                 remove_if_exists(&root.join("screenshots"))?;
                 remove_if_exists(&root.join("logs"))?;
+                remove_if_exists(&root.join("phases"))?;
             }
         }
 
