@@ -299,6 +299,8 @@ Published images are `ghcr.io/razzeee/flatpak-smoke` for verification and
 Linux amd64 and contain the tool and desktop dependencies, but not app runtimes.
 Pass `--allow-network-remotes` when those need downloading from Flathub.
 Use a published release tag or `sha-<full-commit-sha>`; digest pinning is supported.
+The action runs Docker with `--privileged`; use it only on trusted runners and
+workflows. See [security and image maintenance](security.md) before adopting it.
 
 ### Building from source
 

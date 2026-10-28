@@ -1,11 +1,12 @@
-FROM rust:1-trixie AS builder
+# Update these digests deliberately; see docs/security.md.
+FROM rust:1-trixie@sha256:53766005847cbe02c3f59bfa49c1c4bb16695f2c9e5829c3d576a15406f5e733 AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY desktop ./desktop
 RUN cargo build --release --locked
 
-FROM debian:trixie-slim AS runtime
+FROM debian:trixie-slim@sha256:89c1ea91e897f0fe0a3731595330bc45b8bdef4047464a07116f891a94054b31 AS runtime
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
