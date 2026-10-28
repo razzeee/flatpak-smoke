@@ -25,10 +25,12 @@ the action wrapper and system services still start as root.
 ## Build inputs and updates
 
 The Rust builder and Debian runtime base images in both production Containerfiles
-are pinned by OCI manifest digest. Dependabot checks Docker dependencies weekly;
-review base-image digest updates rather than replacing the pins with floating
-tags. Keep the human-readable tag beside each digest so the intended release
-line remains clear.
+are pinned by OCI manifest digest. Dependabot is configured to check Docker
+dependencies weekly, but do not rely on it to cover every stage and Containerfile.
+Before each release, manually check both the Rust builder and Debian runtime
+digests in both production Containerfiles against their upstream tags. Review
+updates rather than replacing the pins with floating tags. Keep the human-readable
+tag beside each digest so the intended release line remains clear.
 
 APT packages are intentionally installed from the current Debian Trixie
 repositories at image build time, rather than pinned to old package versions.
@@ -51,6 +53,9 @@ Before publishing a new image/action release:
 The release workflow attaches BuildKit provenance and an SBOM to each pushed
 image. Consumers can inspect those OCI attestations by digest; they supplement,
 but do not replace, verifying the source revision, builder, and dependencies.
+The SBOM generator image is also digest-pinned in `.github/workflows/ci.yml`.
+Review its `stable-1` tag for updates during release preparation and update the
+pin deliberately; Dependabot is not assumed to update this action input.
 
 The published images and CI build currently target `linux/amd64` only. Other
 architectures are not tested or supported; adding them requires native or
