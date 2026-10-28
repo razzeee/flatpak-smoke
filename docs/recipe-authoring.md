@@ -13,7 +13,7 @@ docker build -f Containerfile.screenshots -t flatpak-smoke-author .
 
 ## Start a draft
 
-Create the recipe in your app's repository so you can commit it there. This layout
+Create the recipe in your app's repository. This layout
 keeps the recipe and sample files together:
 
 ```text
@@ -145,25 +145,13 @@ command exits and keeps the diagnostics. Edit the draft and rerun the command.
 
 ## What to commit
 
-After `finish` reports a successful replay, review `ci/screenshots.yml` and commit
-it with any files under `ci/fixtures/` that the recipe uses:
+After `finish` reports a successful replay, review and commit `ci/screenshots.yml`
+with every file or directory referenced by `setup.files`. Keep their relative
+paths unchanged if you move them into another checkout.
 
-```sh
-git add ci/screenshots.yml
-git add ci/fixtures/  # only if you added sample files
-git commit -m "Add screenshot recipe"
-```
-
-If you followed the layout above, the files are already in your repository.
-If you authored the recipe elsewhere, copy `screenshots.yml` and its `fixtures/`
-directory together into your repository's `ci/` directory. Keep their relative
-paths the same. Include every file or directory listed in `setup.files`.
-
-You do not need to commit the generated `artifacts/` directory or the Flatpak
-bundle to run the recipe. CI builds the bundle, then uses the checked-in recipe
-and fixtures. Add `artifacts/` to your app repository's `.gitignore` if you want
-Git to ignore these local results. Keep screenshots separately if you plan to
-publish them.
+Do not commit the generated `artifacts/` directory or Flatpak bundle for replay.
+CI builds the bundle and uses the checked-in recipe and fixtures. Keep screenshots
+separately if you plan to publish them.
 
 To run the saved recipe again from your app checkout:
 

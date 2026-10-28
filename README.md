@@ -1,8 +1,5 @@
 # flatpak-smoke
 
-For repeated verification and screenshot runs, see [reusable runtime inputs](docs/reusable-dependencies.md)
-for the shared `--dependency-repo` option and action input.
-
 Check that your Flatpak installs and shows a window, or capture native-window
 screenshots for your app listing. Both workflows run headlessly in CI.
 
@@ -12,11 +9,9 @@ Build a `.flatpak` bundle in your app's repository. The examples below run after
 that build on a **Linux amd64 runner with Docker and privileged-container support**.
 Replace `build/org.example.App.flatpak` with your bundle path.
 
-The examples target **v0.5.1**. Its action tag and GHCR images
-must be published before these versioned examples can run. Until then, use the
-[source-build instructions](docs/reference.md#building-from-source) and the
-action's `image` override. Publication happens through CI; see the
-[release checklist](docs/releases.md).
+The examples target **v0.5.1** and require its action tag and images to be
+published. If they are unavailable, build the images
+[from source](docs/reference.md#building-from-source) and set the action's `image` input.
 
 ## Smoke-test your app in GitHub Actions
 
@@ -43,16 +38,9 @@ The action fails if installation or startup fails, the app exits during the test
 no visible content appears, or OCR detects a known fatal error message. It saves
 `result.json`, screenshots, and logs in the output directory.
 
-Final screenshots must pass a content heuristic; empty diagnostic baselines and
-`last-candidate.png` remain available in the logs. Smoke capture parks the VNC
-pointer at `(1, 1)` and rejects variation confined to that parking area, rather
-than rejecting every small control. This depends on pointer parking taking
-effect; app content confined to that area is also indistinguishable from a cursor.
-Recipe capture excludes the compositor cursor through GNOME's screenshot API
-and checks the window interior before publishing. Neither pipeline can reliably
-identify an app-drawn cursor-like shape from pixels alone. Sparse controls are
-allowed when they pass the existing interior-contrast threshold; small windows,
-header-only content, and very low-contrast content may still fail that heuristic.
+Content detection is a heuristic: very small windows, low-contrast views, or
+content confined to a header may fail. Inspect the screenshots and logs when
+diagnosing a failure.
 
 `allow-network-remotes` lets Flatpak download missing runtimes from Flathub. For
 apps that reject root, add `user: nobody`. To click a button and check the next
@@ -187,3 +175,4 @@ for apps that require another user.
 - [CLI reference](docs/reference.md): local OSTree repos, timeouts, results, host
   installation, and troubleshooting.
 - [Tested app compatibility](docs/screenshot-compatibility.md).
+- [Reusable runtime inputs](docs/reusable-dependencies.md): avoid repeated runtime downloads.

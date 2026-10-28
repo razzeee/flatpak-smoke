@@ -1,20 +1,16 @@
 # CLI reference
 
 For app-author setup and CI integration, start with the [quick start](../README.md).
-Commands below that use Cargo, local Containerfiles, or fixtures assume you are
+Commands below that use Cargo or local Containerfiles assume you are
 in a checkout of the flatpak-smoke repository.
 
-Headless smoke testing for Flatpak application builds.
-
 `flatpak-smoke` installs a Flatpak artifact into an isolated temporary user installation, starts it inside a headless Weston Wayland session, waits for the app to draw a visible frame, captures screenshots, OCR-checks for common fatal error screens, and writes a CI-friendly `result.json`.
-
-It is intended for build pipelines that need a fast answer to: "does this freshly built Flatpak install and show a real application window?"
 
 It also captures native application-window screenshots using an author-written
 recipe in a headless GNOME session. These commands produce ordered PNGs and
 captions for app listings. See [Screenshot recipes](#screenshot-recipes).
 
-## Basic Usage
+## Basic usage
 
 From a source checkout, run the CLI through Cargo. The `--` separates Cargo arguments from `flatpak-smoke` arguments.
 
@@ -38,7 +34,7 @@ cargo run -- verify-bundle ./build/org.example.App.flatpak \
 
 ## Commands
 
-### Verify A Bundle
+### Verify a bundle
 
 Use `verify-bundle` for a `.flatpak` file produced by `flatpak build-bundle`.
 
@@ -55,7 +51,7 @@ cargo run -- verify-bundle ./build/org.example.App.flatpak \
   --allow-network-remotes
 ```
 
-### Verify A Local Repo Ref
+### Verify a local repo ref
 
 Use `verify-repo` for an app ref from a local Flatpak OSTree repository.
 
@@ -64,7 +60,7 @@ cargo run -- verify-repo ./repo app/org.example.App/x86_64/stable \
   --output ./flatpak-smoke-output
 ```
 
-### Check The Environment
+### Check the environment
 
 Use `doctor` to check whether the normal verification toolchain is available.
 
@@ -72,22 +68,14 @@ Use `doctor` to check whether the normal verification toolchain is available.
 cargo run -- doctor
 ```
 
-## What A Run Does
+## Run isolation
 
-For each verification run, `flatpak-smoke`:
+Each run starts with a fresh temporary home, Flatpak user installation, and app
+profile, including when using the host CLI. Verification waits for visible app
+content across at least three samples spanning 750ms before capturing it.
+Animation is allowed; a long-lived splash screen can still pass this check.
 
-1. Prepares the output directory.
-2. Checks required runtime tools.
-3. Creates an isolated temporary home, Flatpak user installation, and XDG environment. App data starts fresh for each run, including when using the host CLI.
-4. Writes an `xdg-desktop-portal` config that prefers the GTK portal backend and GNOME Keyring for the Secret portal.
-5. Installs the bundle or repo ref.
-6. Reads effective Flatpak socket permissions and starts a headless Weston Wayland compositor with a local VNC backend for screenshots and pointer input. Apps without a Wayland socket but with `x11` or `fallback-x11` use Weston's Xwayland compatibility; other apps retain the Wayland launch path. It waits for the display and background before launching the app.
-7. Launches the app through `dbus-run-session` and `flatpak run`.
-8. Waits for visible app content to persist across at least three samples spanning at least 750ms. Each sample is compared with the compositor background to locate foreground regions; their interiors must contain visible detail. A blank sample restarts observation; animation is allowed.
-9. Captures screenshots and OCR-checks them for fatal error markers.
-10. Writes `result.json`.
-
-## Failure Conditions
+## Failure conditions
 
 A run fails when any of these happen:
 
@@ -117,13 +105,6 @@ not native window geometry: tiny windows, overlapping windows, unusual shadows,
 or meaningful content confined to the header can defeat this estimate. The
 saved screenshot retains the full desktop pixels.
 
-The runner checks app and compositor liveness while waiting on image tools, VNC
-I/O, and interaction delays, and once more before reporting success. After a
-launcher handoff, instance probes share the active deadline and are cached for
-up to 100ms during I/O. The final success check bypasses that cache. A short
-observation period cannot prove that startup has finished or distinguish a
-long-lived splash screen from the main window.
-
 Interaction screenshots can be requested with `--screenshot-after-click <BUTTON_LABEL>`. The label is located in the previous screenshot with OCR, with a matching primary-action visual fallback for small inverse button labels, clicked through the local Weston VNC backend, and captured as a required follow-up artifact:
 
 ```sh
@@ -134,7 +115,7 @@ cargo run -- verify-bundle ./build/org.example.App.flatpak \
 
 The first requested click writes `screenshots/001-after-click-log-in.png`; later clicks increment the prefix. A run fails if the click text cannot be found, the pointer event cannot be delivered, the follow-up screenshot is blank, or the screenshot does not visibly change before `--screenshot-timeout`.
 
-## Output Directory
+## Output directory
 
 Each run writes:
 
@@ -185,14 +166,14 @@ flatpak-smoke-output/
 }
 ```
 
-`phase_metadata` is an additive part of `result.json` (schema version 1). It
+`phase_metadata` in `result.json` (schema version 1)
 reports what the verifier or screenshot runner found in its own private Flatpak
 installation after installation: `app` is the installed app, and `runtimes` is
 the list of installed runtime refs. Each entry has a Flatpak `ref` and a
 `commit`; the commit is `null` when Flatpak could not report it. `runtimes` is
 `null` when Flatpak could not enumerate them, and an empty array when the query
-succeeded but found none. On failures before installation, app and recipe
-metadata remain `null` and runtimes is `null`. Screenshot recipe metadata is
+succeeded but found none. Before installation, app and runtime metadata are
+`null`. Screenshot recipe metadata is
 hashed before dependency installation, so it can be populated even when a later
 dependency check fails; only app metadata remains `null` before installation.
 For screenshot runs,
@@ -201,33 +182,19 @@ MD5 of the exact recipe file bytes; it is `null` when recipe content cannot be
 read. Verification runs have `recipe: null`. These fields supplement, rather
 than replace, `app_ref` and `screenshots.json` metadata.
 
-Screenshot `phase_metadata.recipe.input_digest` is an additive, nullable field
+Screenshot `phase_metadata.recipe.input_digest` is a nullable field
 in schema version 1. It has format `v1:sha256:<64 lowercase hex digits>` and
 covers the exact parsed YAML bytes plus every referenced `setup.files` file or
-directory tree. Unlike the unchanged YAML-only `content_hash`, it detects
+directory tree. Unlike the YAML-only `content_hash`, it detects
 fixture-only changes. It is populated only after setup and launch-argument
 preparation succeed, before the app starts; earlier failures leave it `null`.
 Older results may omit it. Consumers should compare digests of the same version
 and treat missing/null values as unknown, not as an unchanged input set.
 
-Version 1 hashes a sequence of fields, each prefixed by its byte length as an
-unsigned 64-bit big-endian integer. The fields are:
-
-- ASCII `flatpak-smoke-recipe-input-v1`, then the original YAML bytes.
-- For each setup entry in YAML order, ASCII `setup`, followed by a depth-first
-  traversal of that source, sorting each directory's entries by raw filename
-  bytes. Each node contributes ASCII `directory` or `file`, then its
-  recipe-relative source path (raw Unix path bytes, `/` separator). Files also
-  contribute the 32-byte SHA-256 of their copied contents.
-
-Empty directories and file names count. File contents are hashed from the same
-buffers successfully written to the fresh profile, with no separate source read
-for hashing. Thus the digest describes the seeded snapshot even if a source
-changes during copying; it does not guarantee an atomic snapshot of a concurrently
-edited source tree. Absolute checkout/profile paths, timestamps, permissions,
-unreferenced files, and later app-generated data are excluded. Relocating an
-identical recipe tree preserves the digest. Existing symlink, special-file,
-destination-conflict and deadline checks still apply.
+The digest includes file names and empty directories, but excludes absolute
+checkout paths, timestamps, permissions, and app-generated data. Moving an
+identical recipe tree preserves it. Keep source files unchanged during setup;
+copying is not an atomic snapshot of concurrent edits.
 
 On failure, `status` is `failed` and `failure` contains a machine-readable reason plus a human-readable message.
 
@@ -240,8 +207,7 @@ Screenshot runs can additionally report `failure.category`:
 
 For example, a disconnected native helper reports
 `{"reason":"screenshot_failed","category":"infrastructure","message":"native capture helper disconnected"}`.
-The existing reason codes and schema version 1 are retained; category is an
-optional additive field. Missing or null category means **unclassified**, not
+Category is optional. Missing or null category means **unclassified**, not
 recipe failure. Older runners, verification runs, and capture paths without a
 known classification omit it. In particular, `screenshot_failed` alone does not
 distinguish infrastructure from app/recipe behavior. Consumers should tolerate
@@ -250,7 +216,7 @@ unknown categories and retain their own verdict/presentation policy.
 The category describes the primary reported failure, not every secondary cleanup
 error in the message. Concrete process/helper health failures take precedence
 over a step error; a bare deadline check does not erase that step's classified
-failure. Final helper checks preserve existing specific reasons such as
+failure. Final helper checks report specific reasons such as
 `display_exited` and `early_exit`. `screenshots.json.failed_step_index` locates
 recipe-step failures; a null index can also indicate a final helper-check failure.
 Preflight and output failures that prevent result publication can still leave no
@@ -279,11 +245,6 @@ remaining stage and overall timeout budgets. Receiving partial VNC data does not
 restart the deadline. Cleanup can extend the run slightly beyond its timeout:
 each owned process group gets up to 200ms to stop before forced termination.
 
-Verification OCR, like recipe OCR, sets `OMP_THREAD_LIMIT=1` for Tesseract only,
-overriding inherited values to avoid worker-pool contention with software-rendered
-desktops. This does not extend either deadline or make OCR failures optional.
-See [the VSCodium OCR investigation](verification-ocr.md) for replay instructions.
-
 `SIGINT` and `SIGTERM` cancel the run through the normal failure path. The runner
 cleans up its app, compositor, and helper process groups, including background
 children whose parent has already exited. The private D-Bus session remains alive
@@ -299,7 +260,7 @@ cargo run -- verify-bundle ./build/org.example.App.flatpak \
   --window-timeout 45s
 ```
 
-## Runtime Requirements
+## Runtime requirements
 
 Normal verification requires:
 
@@ -323,39 +284,21 @@ cargo run -- doctor
 
 ### X11 compatibility in verification
 
-Verification remains a Wayland session (`XDG_SESSION_TYPE=wayland`), including
-for legacy X11 apps. If the installed app's effective permissions expose only
-X11, Weston starts its rootless Xwayland module. The verifier discovers the
-display from its own compositor log, verifies its lock belongs to that compositor,
-and requires a successful, deadline-bounded `xdpyinfo` query before app launch.
-Weston's lazy socket listener alone is not sufficient readiness.
+Verification prefers Wayland when the app permits it. Apps with `x11` or
+`fallback-x11` but no Wayland socket use Xwayland inside the headless Weston
+session. The runner uses the app's existing permissions; it does not grant extra
+display sockets. Capture, OCR, and clicking work in either mode.
 
-Only that display is passed to Flatpak, which exposes the socket according to the
-app's existing permissions. Inherited `DISPLAY` and `XAUTHORITY` are discarded;
-no extra socket permissions are granted. GTK, Qt, SDL, Clutter and Mozilla launch
-settings match the selected display. When Wayland is permitted it remains preferred;
-apps with no declared display sockets retain the previous Wayland launch behavior.
+`doctor` checks both display capabilities. Native Wayland verification does not
+require the Xwayland-specific tools.
 
-Capture, OCR, clicking, visible-content checks and app-exit checks still use the
-same Weston/VNC workflow. There is no native X11 desktop/backend and no retry of
-an app after a launch, window, OCR or other arbitrary failure. A compatibility
-readiness failure fails before app launch. Weston allocates its X11 display and
-owns its socket/lock teardown; normal process-group cleanup also stops Xwayland.
-`doctor` checks both display capabilities, but native Wayland verification does
-not require the Xwayland-specific tools.
-
-This selection applies to `verify-bundle` / `verify-repo`, not the separate GNOME
-native-window screenshot recipe workflow. See [the VLC diagnosis](xwayland-diagnosis.md)
-for controlled evidence and regression coverage.
-
-## Container Usage
+## Container usage
 
 Published images are `ghcr.io/razzeee/flatpak-smoke` for verification and
 `ghcr.io/razzeee/flatpak-smoke-screenshots` for native screenshots. They support
 Linux amd64 and contain the tool and desktop dependencies, but not app runtimes.
 Pass `--allow-network-remotes` when those need downloading from Flathub.
 Use a published release tag or `sha-<full-commit-sha>`; digest pinning is supported.
-See the README for first-release availability.
 
 ### Building from source
 
@@ -448,6 +391,7 @@ on self-hosted runners. No Rust toolchain is required.
 | `bundle` | None | Workspace-relative `.flatpak` bundle. Mutually exclusive with `repo` and `app-ref`. |
 | `repo` | None | Workspace-relative OSTree repository, used instead of `bundle`. |
 | `app-ref` | None | Full `app/ID/ARCH/BRANCH` ref, required with `repo`. |
+| `dependency-repo` | None | Workspace-relative published runtime repository, mounted read-only. See [runtime reuse](reusable-dependencies.md). |
 | `recipe` | None | Workspace-relative recipe file, required for `screenshots`; invalid for `verify`. |
 | `output` | `artifacts/flatpak-smoke` | Output directory beneath the workspace. Existing artifacts require `args: --force`. |
 | `allow-network-remotes` | `false` | Set to `"true"` to download missing runtimes from Flathub. |
@@ -485,8 +429,8 @@ The CLI exit status fails the step. Upload results in a separate
 
 The CLI's `--overall-timeout` remains independent and should be shorter than
 `execution-timeout`, leaving time for image pulls and CLI result publication.
-For example, `args: --overall-timeout 5m`, `execution-timeout: '420'` and
-`cleanup-timeout: '30'` replace a consumer's GNU `timeout 420s` wrapper.
+For example, use `args: --overall-timeout 5m`, `execution-timeout: '420'`, and
+`cleanup-timeout: '30'` for a five-minute run with time for image pulls and cleanup.
 Keep an outer process/job deadline longer than their sum (for example 480 seconds)
 to allow Python startup and artifact publication and protect against runner failure.
 
@@ -547,15 +491,15 @@ locally built image. Forks publishing to another owner must override `image`.
 
 ## Troubleshooting
 
-### The Output Directory Already Exists
+### The output directory already exists
 
 Use `--force` to replace prior `result.json`, `screenshots/`, and `logs/` artifacts.
 
-### Runtime Dependencies Are Missing
+### Runtime dependencies are missing
 
 Use `--allow-network-remotes` if the bundle needs runtimes or extensions that are not available in the isolated Flatpak user installation.
 
-### The App Needs More Time
+### The app needs more time
 
 Increase `--overall-timeout` and `--window-timeout` for slow installs or first launches.
 
@@ -572,31 +516,6 @@ container does not itself grant the Flatpak sandbox access. Check that the app
 supports the supplied argument and file format. Inspect `result.json` and
 `logs/app.stderr.log` when launching fails.
 
-## Readiness regression fixtures
-
-The Wayland fixture accepts `FLATPAK_SMOKE_FIXTURE_MODE` with `normal`, `delayed`,
-`never-draw`, `blank-client`, `blank-after-click`, `delayed-content`,
-`crash-after-frame`, `animated`, or `exit-after-click`. The default is `normal`.
-These modes exercise delayed rendering, presented-but-blank windows, content that
-disappears after interaction, crashes during observation, and animation.
-
-After building the container and fixture bundle, run the mode checks with:
-
-```sh
-python3 tests/fixture_modes.py
-```
-
-CI runs these checks on pull requests and retains each mode's result and images
-under `target/fixture-modes/`.
-
-The `e2e-tests` target in `Containerfile` also supplies Python for
-`tests/smoke_lifecycle.py`. That suite runs twice against the same caller home to
-check fresh app profiles, exercises a detached launcher, and cancels a detached
-run while checking that its sandbox processes stop. CI retains the evidence under
-`target/smoke-lifecycle/`. The standalone image-content regression can be run with
-`cargo test smoke_content_rejects_blank_windows_and_decorations -- --ignored`
-on a host with ImageMagick.
-
 ## Screenshot recipes
 
 `screenshot-bundle` and `screenshot-repo` capture app windows in an
@@ -605,15 +524,9 @@ corners, and transparency. Listing images contain neither the desktop wallpaper
 nor the pointer. The tool saves native pixels without adding shadows or scaling
 the exported PNG.
 
-GNOME remains a Wayland compositor. X11-only apps use its authenticated Xwayland
-compatibility path, with the session's actual display and private Xauthority file
-passed through Flatpak's normal socket handling. The runner creates a missing
-`/tmp/.X11-unix` with mode 1777 before starting that path; existing directories
-are left unchanged and must already have correct ownership/permissions. Native
-Wayland sessions do not initialize Xwayland. Cleanup gives the owning Xwayland
-session up to one second to quit cooperatively before forced process-group cleanup.
-See [the v0.4.0 capture diagnosis](gnome-xwayland-capture.md) for the startup
-failure, reproduction and remaining VLC recipe limitations.
+X11-only apps use GNOME's authenticated Xwayland compatibility path. Existing
+`/tmp/.X11-unix` directories must have appropriate ownership and mode 1777;
+the runner creates the directory if missing but does not change an existing one.
 
 ```sh
 flatpak-smoke screenshot-bundle ./org.example.App.flatpak \
@@ -624,7 +537,7 @@ flatpak-smoke screenshot-repo ./repo app/org.example.App/x86_64/stable \
   --recipe ./screenshots.yml --output ./capture-output
 ```
 
-The first backend supports GNOME Shell **48**, tested with 48.7. The dedicated
+Screenshot capture supports GNOME Shell **48**, tested with 48.7. The dedicated
 image supplies its dependencies, English locale, and platform-default appearance:
 
 ```sh
@@ -677,7 +590,6 @@ steps:
       caption: Choose how the app behaves
 ```
 
-This example runs against the GTK and Qt screenshot fixtures in `fixtures/screenshot/`.
 Adapt labels, shortcuts, and capture points to your app. Each step contains
 exactly one action and an optional `timeout`:
 
@@ -703,11 +615,10 @@ capture. Set `window.title` when the app has several principal windows. Requeste
 and secondary-window sizes must fit within 1000×700 logical pixels. Shadows can
 extend the PNG beyond the frame dimensions. Version one supports English and
 scale factor one. The desktop is selected explicitly, not inferred from the
-Flatpak runtime; a future KDE backend can use the same recipe actions.
+Flatpak runtime.
 
-See the [real-app compatibility matrix](screenshot-compatibility.md) for
-tested GTK, Qt, and Electron builds, repeat/concurrency checks, and instructions
-for running apps as a non-root user in the screenshot container.
+See [screenshot compatibility](screenshot-compatibility.md) for tested builds
+and app-specific setup.
 
 Screenshot commands default to a five-minute overall timeout, 30 seconds for
 desktop startup, 30 seconds for initial window readiness, and ten seconds per
@@ -738,7 +649,7 @@ language, scale, app ref, recipe version, and ordered `captures`. Each capture
 contains its name, relative path, caption, PNG dimensions, and logical window
 dimensions. `failed_step_index` is zero-based, or null on success and for failures
 outside recipe execution. Earlier completed captures remain available on failure.
-`result.json` uses the existing run-result schema.
+`result.json` uses the same schema as verification runs.
 
 OCR uses separate enlarged diagnostic images, including a contrast pass for small
 button labels. These copies and their TSV output stay under `logs/`; they never
