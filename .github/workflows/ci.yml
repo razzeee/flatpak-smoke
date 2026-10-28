@@ -69,6 +69,9 @@ jobs:
       - name: Check action wrapper
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_action.py
 
+      - name: Check paired-run evidence and orchestration
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_compare.py
+
       - name: Check release safeguards
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_release.py
 
@@ -319,6 +322,9 @@ jobs:
           image: screenshot-production
           dependency-repo: target/dependencies
 
+      - name: Compare unchanged and regressed GTK bundles
+        run: python3 tests/paired_runs.py
+
       - name: Capture seeded repository through the action as non-root
         uses: ./
         with:
@@ -362,6 +368,9 @@ jobs:
             target/screenshot-setup-*/**
             target/screenshot-action-*/**
             target/xwayland-capture/**
+            target/paired-unchanged/**
+            target/paired-regression/**
+            !target/paired-*/inputs/**
 
   publish:
     name: Publish ${{ matrix.image }}

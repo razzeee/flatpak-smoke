@@ -6,11 +6,14 @@ pub struct Manifest {
     pub schema_version: u8,
     pub desktop: String,
     pub desktop_version: Option<String>,
+    pub backend: Option<String>,
+    pub runner_version: String,
     pub language: String,
     pub scale: u32,
     pub recipe_version: u32,
     pub app_ref: Option<String>,
     pub failed_step_index: Option<usize>,
+    pub failed_step_action: Option<String>,
     pub captures: Vec<Capture>,
 }
 
@@ -32,11 +35,14 @@ impl Manifest {
             schema_version: 1,
             desktop: "gnome".into(),
             desktop_version: None,
+            backend: None,
+            runner_version: env!("CARGO_PKG_VERSION").into(),
             language: "en".into(),
             scale: 1,
             recipe_version: 1,
             app_ref: None,
             failed_step_index: None,
+            failed_step_action: None,
             captures: Vec::new(),
         }
     }

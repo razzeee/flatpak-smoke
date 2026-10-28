@@ -29,7 +29,7 @@ def workspace_path(workspace, value, name, kind=None):
     return resolved.relative_to(workspace).as_posix()
 
 
-def command(inputs, workspace):
+def command(inputs, workspace, *, isolated=False):
     mode = inputs.get("mode") or "verify"
     if mode not in ("verify", "screenshots"):
         raise ValueError("mode must be verify or screenshots")
@@ -78,7 +78,9 @@ def command(inputs, workspace):
     docker = ["docker", "run", "--rm", "--init", "--name", name, "--privileged", "--tmpfs", "/run"]
     if mode == "screenshots":
         docker += ["--tmpfs", "/dev/dri"]
-    docker += ["-v", f"{workspace}:/workspace", "-w", "/workspace"]
+    docker += ["-v", f"{workspace}:/workspace" + (":ro" if isolated else ""), "-w", "/workspace"]
+    if isolated:
+        docker += ["--network", "none", "-v", f"{workspace / output}:/workspace/{output}:rw"]
     if dependency_repo:
         docker += ["-v", f"{workspace / dependency_repo}:/workspace/{dependency_repo}:ro"]
     docker += [
@@ -129,12 +131,10 @@ def cleanup(name, budget, interrupted):
     return results
 
 
-def main():
+def execute(inputs, workspace, *, isolated=False, output_file=None):
     if platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64"):
         raise ValueError("the action requires a Linux amd64 runner with Docker")
-    inputs = json.loads(os.environ["FLATPAK_SMOKE_INPUTS"])
-    workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-    docker, output, name = command(inputs, workspace)
+    docker, output, name = command(inputs, workspace, isolated=isolated)
     execution_timeout = seconds(inputs, "execution-timeout", 900)
     cleanup_timeout = seconds(inputs, "cleanup-timeout", 30)
     # Create parent directories as the host user so checkout cleanup can remove them.
@@ -146,8 +146,9 @@ def main():
               "cleanup_timeout_seconds": cleanup_timeout, "exit_code": None,
               "signal": None, "cleanup": None}
     write_record(record_path, record)
-    with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
-        stream.write(f"output={output}\nexecution={output}.execution.json\n")
+    if output_file is not None:
+        with open(output_file, "a") as stream:
+            stream.write(f"output={output}\nexecution={output}.execution.json\n")
     def cancel(signum, _frame):
         record["signal"] = signum
         raise KeyboardInterrupt
@@ -189,6 +190,12 @@ def main():
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
     return code
+
+
+def main():
+    return execute(json.loads(os.environ["FLATPAK_SMOKE_INPUTS"]),
+                   Path(os.environ["GITHUB_WORKSPACE"]).resolve(),
+                   output_file=os.environ["GITHUB_OUTPUT"])
 
 
 if __name__ == "__main__":

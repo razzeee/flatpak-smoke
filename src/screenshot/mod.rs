@@ -185,6 +185,13 @@ fn run(common: ScreenshotArgs, source: Source) -> anyhow::Result<()> {
             String::from_utf8_lossy(&permissions.stderr).trim()
         );
         let backend = AppBackend::from_permissions(&String::from_utf8_lossy(&permissions.stdout));
+        manifest.backend = Some(
+            match backend {
+                AppBackend::Wayland => "wayland",
+                AppBackend::Xwayland => "xwayland",
+            }
+            .into(),
+        );
         layout.append_runner_log(format!("selected screenshot display backend: {backend:?}"))?;
         if backend == AppBackend::Xwayland {
             let missing = tools::missing_tools(tools::XWAYLAND_TOOLS);

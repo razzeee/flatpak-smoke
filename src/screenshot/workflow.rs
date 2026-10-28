@@ -104,6 +104,17 @@ impl Workflow<'_> {
     ) -> anyhow::Result<()> {
         for (index, step) in recipe.steps.iter().enumerate() {
             manifest.failed_step_index = Some(index);
+            manifest.failed_step_action = Some(
+                match &step.action {
+                    Action::Capture(_) => "capture",
+                    Action::ClickText(_) => "click_text",
+                    Action::TypeText(_) => "type_text",
+                    Action::Key(_) => "key",
+                    Action::WaitText(_) => "wait_text",
+                    Action::SelectWindow(_) => "select_window",
+                }
+                .into(),
+            );
             self.layout
                 .append_runner_log(format!("recipe step {index}"))?;
             let deadline = bounded(self.overall, step.timeout.unwrap_or(default_timeout));
@@ -119,6 +130,7 @@ impl Workflow<'_> {
             })?;
         }
         manifest.failed_step_index = None;
+        manifest.failed_step_action = None;
         remaining(self.overall)?;
         self.desktop
             .windows(bounded(self.overall, Duration::from_secs(1)))
