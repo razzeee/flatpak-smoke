@@ -48,6 +48,10 @@ Before publishing a new image/action release:
    supply-chain pin; set its `image` input to `...@sha256:<digest>` when that is
    required. Pin the action itself to a full commit SHA as well.
 
+The release workflow attaches BuildKit provenance and an SBOM to each pushed
+image. Consumers can inspect those OCI attestations by digest; they supplement,
+but do not replace, verifying the source revision, builder, and dependencies.
+
 The published images and CI build currently target `linux/amd64` only. Other
 architectures are not tested or supported; adding them requires native or
 emulated end-to-end coverage for Flatpak, Xwayland, and screenshot capture.
