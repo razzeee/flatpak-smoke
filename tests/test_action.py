@@ -90,7 +90,7 @@ class ActionTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     command = json.loads((self.workspace / "docker.json").read_text())
                     suffix = "-screenshots" if mode == "screenshots" else ""
-                    self.assertIn(f"ghcr.io/razzeee/flatpak-smoke{suffix}:v0.5.1", command)
+                    self.assertIn(f"ghcr.io/razzeee/flatpak-smoke{suffix}:v0.6.0", command)
 
     def test_invalid_inputs_fail_before_docker(self):
         for changes in [

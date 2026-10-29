@@ -9,7 +9,7 @@ Build a `.flatpak` bundle in your app's repository. The examples below run after
 that build on a **Linux amd64 runner with Docker and privileged-container support**.
 Replace `build/org.example.App.flatpak` with your bundle path.
 
-The examples target **v0.5.1** and require its action tag and images to be
+The examples target **v0.6.0** and require its action tag and images to be
 published. If they are unavailable, build the images
 [from source](docs/reference.md#building-from-source) and set the action's `image` input.
 
@@ -19,7 +19,7 @@ Add these steps after checkout and your Flatpak build in an `ubuntu-latest` job:
 
 ```yaml
 - name: Check that the app starts
-  uses: razzeee/flatpak-smoke@v0.5.1
+  uses: razzeee/flatpak-smoke@v0.6.0
   with:
     bundle: build/org.example.App.flatpak
     output: artifacts/smoke
@@ -122,7 +122,7 @@ for the copy rules.
 
 ```yaml
 - name: Capture listing screenshots
-  uses: razzeee/flatpak-smoke@v0.5.1
+  uses: razzeee/flatpak-smoke@v0.6.0
   with:
     mode: screenshots
     bundle: build/org.example.App.flatpak
@@ -150,17 +150,17 @@ Review the images before publishing them.
 Run these commands from your app's checkout, using the same bundle and recipe:
 
 ```sh
-docker pull ghcr.io/razzeee/flatpak-smoke:v0.5.1
+docker pull ghcr.io/razzeee/flatpak-smoke:v0.6.0
 docker run --rm --privileged \
   -v "$PWD:/workspace" -w /workspace \
-  ghcr.io/razzeee/flatpak-smoke:v0.5.1 \
+  ghcr.io/razzeee/flatpak-smoke:v0.6.0 \
   verify-bundle build/org.example.App.flatpak \
   --output artifacts/smoke --allow-network-remotes --overall-timeout 5m
 
-docker pull ghcr.io/razzeee/flatpak-smoke-screenshots:v0.5.1
+docker pull ghcr.io/razzeee/flatpak-smoke-screenshots:v0.6.0
 docker run --rm --privileged --tmpfs /run --tmpfs /dev/dri \
   -v "$PWD:/workspace" -w /workspace \
-  ghcr.io/razzeee/flatpak-smoke-screenshots:v0.5.1 \
+  ghcr.io/razzeee/flatpak-smoke-screenshots:v0.6.0 \
   flatpak-smoke screenshot-bundle build/org.example.App.flatpak \
   --recipe ci/screenshots.yml --output artifacts/capture --allow-network-remotes
 ```
