@@ -46,13 +46,13 @@ In the GitHub Action, prepare the repository within your app's checkout and pass
 the same path to both steps:
 
 ```yaml
-- uses: razzeee/flatpak-smoke@v0.5.1
+- uses: razzeee/flatpak-smoke@v0.6.0
   with:
     bundle: inputs/app.flatpak
     dependency-repo: inputs/dependencies
     output: results/verify
 
-- uses: razzeee/flatpak-smoke@v0.5.1
+- uses: razzeee/flatpak-smoke@v0.6.0
   with:
     mode: screenshots
     bundle: inputs/app.flatpak
