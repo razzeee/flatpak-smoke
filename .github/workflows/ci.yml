@@ -193,6 +193,8 @@ jobs:
       - name: Verify fresh smoke profiles and detached-app lifecycle
         run: |
           docker build --target e2e-tests -t smoke-lifecycle-tests -f Containerfile .
+          docker run --rm --privileged --entrypoint /usr/local/bin/installer-tests \
+            smoke-lifecycle-tests disconnected_document_portal_does_not_leak_workspace --ignored
           # Exercise the image's Flatpak, not a newer host version which can
           # hide the empty-system-repository regression (issue #43).
           docker run --rm --privileged --tmpfs /run \
@@ -415,6 +417,8 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          provenance: mode=max
+          sbom: generator=docker.io/docker/buildkit-syft-scanner:stable-1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
 

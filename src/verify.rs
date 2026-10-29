@@ -4,7 +4,8 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::Instant,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
@@ -15,10 +16,45 @@ use crate::{
     command::CommandRunner,
     installer::{ArtifactInstaller, InstallError},
     output::OutputLayout,
+    process::BoundedCommand,
     result::{Artifact, FailureReason, RunResult, Timings},
     session::{SessionRunner, click_screenshot_name},
     tools,
 };
+
+struct VerificationWorkspace(TempDir);
+
+impl VerificationWorkspace {
+    fn new() -> std::io::Result<Self> {
+        TempDir::new().map(Self)
+    }
+
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for VerificationWorkspace {
+    fn drop(&mut self) {
+        // The session has stopped by now, but its document portal may leave a
+        // disconnected FUSE mount. Detach it before TempDir removes the tree,
+        // including on cancellation and error returns.
+        if let Ok(mut cleanup) = Command::new("fusermount3")
+            .args(["-uz", "--"])
+            .arg(self.path().join("runtime/doc"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn_managed()
+        {
+            // Cleanup must run even after the normal run deadline or SIGTERM.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline && matches!(cleanup.try_wait(), Ok(None)) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
 
 pub fn verify_bundle(args: VerifyBundleArgs) -> anyhow::Result<()> {
     let VerifyBundleArgs { bundle, common } = args;
@@ -101,7 +137,7 @@ where
         bail!("verification failed: {error}");
     }
 
-    let workspace = TempDir::new().context("creating temporary run workspace")?;
+    let workspace = VerificationWorkspace::new().context("creating temporary run workspace")?;
     let mut env = isolated_flatpak_env(workspace.path())?;
     let isolation = if common.dependency_repo.is_some() {
         crate::installer::isolate_system_installations(
@@ -368,6 +404,55 @@ fn validate_app_ref(app_ref: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a privileged container with /dev/fuse and fusermount3"]
+    fn disconnected_document_portal_does_not_leak_workspace() {
+        use std::{ffi::CString, os::fd::AsRawFd};
+
+        let workspace = VerificationWorkspace::new().unwrap();
+        let home = workspace.path().to_owned();
+        let mountpoint = home.join("runtime/doc");
+        fs::create_dir_all(&mountpoint).unwrap();
+        let fuse = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/fuse")
+            .unwrap();
+        let target = CString::new(mountpoint.as_os_str().as_encoded_bytes()).unwrap();
+        let options = CString::new(format!(
+            "fd={},rootmode=40000,user_id={},group_id={}",
+            fuse.as_raw_fd(),
+            unsafe { libc::getuid() },
+            unsafe { libc::getgid() },
+        ))
+        .unwrap();
+        // Closing the FUSE connection models a document portal exiting before
+        // its mount is detached. Recursive removal cannot traverse this mount.
+        let mounted = unsafe {
+            libc::mount(
+                c"portal-test".as_ptr(),
+                target.as_ptr(),
+                c"fuse".as_ptr(),
+                libc::MS_NOSUID | libc::MS_NODEV,
+                options.as_ptr().cast(),
+            )
+        };
+        assert_eq!(mounted, 0, "{}", std::io::Error::last_os_error());
+        drop(fuse);
+        assert!(fs::metadata(&mountpoint).is_err());
+        drop(workspace);
+        let leaked = home.exists();
+        // Release the test mount even when the regression assertion fails.
+        if leaked {
+            unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+            let _ = fs::remove_dir_all(&home);
+        }
+        assert!(
+            !leaked,
+            "private workspace leaked after document portal exit"
+        );
+    }
 
     #[test]
     fn rejects_screenshot_paths() {

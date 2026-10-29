@@ -176,3 +176,4 @@ for apps that require another user.
   installation, and troubleshooting.
 - [Tested app compatibility](docs/screenshot-compatibility.md).
 - [Reusable runtime inputs](docs/reusable-dependencies.md): avoid repeated runtime downloads.
+- [Security and image maintenance](docs/security.md): trust boundaries, pinned build inputs, and update policy.

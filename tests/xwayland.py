@@ -105,7 +105,23 @@ def main():
         assert runner.count("app launcher pid:") == (0 if readiness_failure else 1), "unexpected app launch count"
         workspace = Path(next(line.split(": ", 1)[1] for line in runner.splitlines()
                               if line.startswith("workspace: ")))
-        assert not workspace.exists(), "private workspace leaked"
+        if workspace.exists():
+            # Capture evidence before the surrounding container is removed.
+            # Bound the listing in case a whole installation remains behind.
+            try:
+                listing = subprocess.run(
+                    ["find", str(workspace), "-maxdepth", "4", "-ls"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError) as error:
+                raise AssertionError(
+                    f"private workspace leaked: {workspace}\n"
+                    f"could not list remaining files: {error}"
+                ) from error
+            raise AssertionError(
+                f"private workspace leaked: {workspace}\n"
+                f"{listing.stdout[:16384]}\n{listing.stderr[:4096]}"
+            )
         weston = (output / "logs/weston.stderr.log").read_text()
         assert ("--xwayland" in weston) == x11, weston
         if not failed:
