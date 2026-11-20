@@ -1,6 +1,6 @@
 version: 1
 steps:
-  - wait_text: README.md
+  - wait_text: Runtime Updates
     timeout: 30s
   - capture:
       name: overview
